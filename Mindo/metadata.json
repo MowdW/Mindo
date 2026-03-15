@@ -1,5 +1,0 @@
-{
-  "name": "Mindo",
-  "description": "一个基于 React 的无限画布思维导图工具，具有节点创建、拖拽、连线和 Gemini AI 创意扩展功能。",
-  "requestFramePermissions": []
-}
