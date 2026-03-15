@@ -1,10 +1,10 @@
 {
 	"id": "mindo",
 	"name": "Mindo",
-	"version": "1.9.0",
+	"version": "1.1.1",
 	"minAppVersion": "0.15.0",
 	"description": "功能强大的 Obsidian 思维导图插件，支持交互式编辑、Markdown 双向同步、AI 辅助内容生成、图片节点和智能配色等高级功能，帮助你可视化思考和整理知识。",
 	"author": "马可菠萝",
-	"authorUrl": "https://github.com/MWD-984848/Mindo",
+	"authorUrl": "https://github.com/MowdW/Mindo",
 	"isDesktopOnly": false
 }
