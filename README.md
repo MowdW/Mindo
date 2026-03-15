@@ -1,5 +1,5 @@
 # Mindo - Obsidian 思维导图插件
-
+![alt text](Mindo插件介绍_1773542526477.png)
 Mindo 是一个功能强大的 Obsidian 思维导图插件，帮助你可视化思考、整理知识和创意。
 
 ## 功能特点

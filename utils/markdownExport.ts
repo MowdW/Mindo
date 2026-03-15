@@ -1,8 +1,20 @@
 import { MindMapNode, MindMapEdge, HandlePosition, EdgeStyle, EdgeArrow, NodeColor } from '../types';
 
-// 生成唯一ID
+// 生成随机ID
 const generateId = (): string => {
     return Math.random().toString(36).substr(2, 9);
+};
+
+// 生成基于内容的稳定ID
+export const generateStableId = (title: string, depth: number): string => {
+    // 使用标题和层级生成稳定的ID
+    const hash = title + depth.toString();
+    let h = 0;
+    for (let i = 0; i < hash.length; i++) {
+        h = ((h << 5) - h) + hash.charCodeAt(i);
+        h = h & h; // 转换为32位整数
+    }
+    return Math.abs(h).toString(36);
 };
 
 export const generateMarkdown = (nodes: MindMapNode[], edges: MindMapEdge[]): string => {
@@ -24,21 +36,22 @@ export const generateMarkdown = (nodes: MindMapNode[], edges: MindMapEdge[]): st
     });
 
     // 2. Identify Root Nodes (In-degree 0)
-    // Filter out group nodes from being strictly "content roots", 
-    // unless they contain nodes, but usually we just want the content structure.
-    // However, if a node is inside a group (parentId), it is visually a child of that group.
-    // For markdown export, let's treat visual connection (edges) as the primary hierarchy.
-    // If a node has no incoming edges, it's a root.
-    
     const roots = nodes.filter(n => (inDegree.get(n.id) || 0) === 0);
-
-    // Sort roots by Y position (top to bottom)
-    roots.sort((a, b) => a.y - b.y);
 
     let markdownOutput = "";
 
     // 3. DFS Traversal to build Markdown
     const visited = new Set<string>();
+
+    // 计算节点的内容量（子节点数量）
+    const getNodeContentSize = (nodeId: string): number => {
+        let size = 1; // 节点本身
+        const childrenIds = adj.get(nodeId) || [];
+        childrenIds.forEach(childId => {
+            size += getNodeContentSize(childId);
+        });
+        return size;
+    };
 
     const processNode = (nodeId: string, depth: number) => {
         if (visited.has(nodeId)) return;
@@ -64,9 +77,9 @@ export const generateMarkdown = (nodes: MindMapNode[], edges: MindMapEdge[]): st
             const headingPrefix = "#".repeat(Math.min(depth + 1, 6)); 
             
             if (depth < 6) {
-                markdownOutput += `${headingPrefix} ${node.title}\n`;
+                markdownOutput += `${headingPrefix} ${node.title || '无标题'}\n`;
             } else {
-                markdownOutput += `${"  ".repeat(depth - 6)}- **${node.title}**\n`;
+                markdownOutput += `${"  ".repeat(depth - 6)}- **${node.title || '无标题'}**\n`;
             }
 
             if (node.content && node.content.trim()) {
@@ -78,21 +91,59 @@ export const generateMarkdown = (nodes: MindMapNode[], edges: MindMapEdge[]): st
 
         // Get children
         const childrenIds = adj.get(nodeId) || [];
-        // Sort children by Y position (or X if same Y)
+        // 按内容量（子节点数量）排序，内容量多的排在前面
         const childrenNodes = childrenIds
             .map(id => nodes.find(n => n.id === id))
             .filter((n): n is MindMapNode => !!n)
-            .sort((a, b) => a.y - b.y || a.x - b.x);
+            .sort((a, b) => {
+                // 按内容量排序，内容量多的排在前面
+                const sizeA = getNodeContentSize(a.id);
+                const sizeB = getNodeContentSize(b.id);
+                return sizeB - sizeA; // 降序排列
+            });
 
         childrenNodes.forEach(child => {
             processNode(child.id, depth + 1);
         });
     };
 
-    roots.forEach(root => {
-        processNode(root.id, 0);
-        markdownOutput += "---\n\n"; // Separator for unconnected trees
+    // 按内容量（子节点数量）排序根节点，内容量多的排在前面
+    const sortedRoots = roots.sort((a, b) => {
+        const sizeA = getNodeContentSize(a.id);
+        const sizeB = getNodeContentSize(b.id);
+        return sizeB - sizeA; // 降序排列
     });
+
+    // 处理根节点
+    if (sortedRoots.length > 0) {
+        // 按内容量排序后的顺序处理根节点
+        sortedRoots.forEach((root, index) => {
+            if (index > 0) {
+                markdownOutput += "---\n\n"; // Separator for unconnected trees
+            }
+            processNode(root.id, 0);
+        });
+    } else if (nodes.length > 0) {
+        // 如果没有找到根节点，使用所有节点作为根节点
+        // 按内容量排序节点
+        const sortedNodes = nodes.sort((a, b) => {
+            const sizeA = getNodeContentSize(a.id);
+            const sizeB = getNodeContentSize(b.id);
+            return sizeB - sizeA; // 降序排列
+        });
+        
+        sortedNodes.forEach(node => {
+            if (!visited.has(node.id)) {
+                processNode(node.id, 0);
+                markdownOutput += "---\n\n"; // Separator for unconnected trees
+            }
+        });
+    }
+
+    // 如果仍然没有生成内容，添加一个默认的标题
+    if (markdownOutput.trim() === "") {
+        markdownOutput = "# 思维导图\n\n没有内容可导出\n";
+    }
 
     return markdownOutput.trim();
 };
@@ -111,8 +162,11 @@ export const parseMarkdown = (markdown: string): { nodes: MindMapNode[], edges: 
     // 颜色数组，用于为不同层级的节点分配不同的颜色
     const colors: NodeColor[] = ['yellow', 'blue', 'green', 'purple', 'red', 'orange'];
     
-    let currentY = 0;
-    const yStep = 120; // 节点之间的垂直间距
+    // 用于跟踪每个父节点的子节点计数，用于垂直位置偏移
+    const childCounts: { [key: string]: number } = {};
+    
+    // 节点之间的垂直间距
+    const yStep = 100;
     
     lines.forEach(line => {
         line = line.trim();
@@ -133,20 +187,40 @@ export const parseMarkdown = (markdown: string): { nodes: MindMapNode[], edges: 
             }
             
             // 创建新节点
-            const nodeId = generateId();
+            const nodeId = generateStableId(title, depth);
             const color = colors[Math.min(depth, colors.length - 1)];
             
-            // 计算节点位置，使节点更靠近视图中心
-            const x = depth * 100; // 减少每级缩进，从200px改为100px
-            const y = currentY;
-            currentY += yStep;
+            // 计算节点位置，使节点更靠近上级节点
+            let x = 0;
+            let y = 0;
+            
+            if (stack.length > 0) {
+                // 子节点位置：在父节点右侧
+                const parentId = stack[stack.length - 1];
+                const parentPos = nodePositions[parentId];
+                if (parentPos) {
+                    // 子节点在父节点右侧 150px 处（更靠近父节点）
+                    x = parentPos.x + 150;
+                    
+                    // 计算垂直位置，为每个子节点添加偏移，避免重叠
+                    const childCount = childCounts[parentId] || 0;
+                    y = parentPos.y + (childCount * (yStep / 2)); // 子节点之间的间距为 yStep/2
+                    
+                    // 更新父节点的子节点计数
+                    childCounts[parentId] = childCount + 1;
+                }
+            } else {
+                // 根节点位置：中心
+                x = 0;
+                y = 0;
+            }
             
             const node: MindMapNode = {
                 id: nodeId,
                 title: title,
                 content: '',
-                x: x - 100, // 向左偏移100px，使根节点更靠近中心
-                y: y - 100, // 向上偏移100px，使根节点更靠近中心
+                x: x - 75, // 向左偏移节点宽度的一半，使节点中心对齐计算位置
+                y: y - 40, // 向上偏移节点高度的一半，使节点中心对齐计算位置
                 width: 150,
                 height: 80,
                 color: color,
@@ -185,14 +259,34 @@ export const parseMarkdown = (markdown: string): { nodes: MindMapNode[], edges: 
                 if (imageMatch) {
                     // 对于图片链接，创建独立的图片节点
                     const assetPath = imageMatch[1];
-                    const nodeId = generateId();
+                    const nodeId = generateStableId(assetPath, stack.length);
                     const depth = stack.length;
                     const color = colors[Math.min(depth, colors.length - 1)];
                     
-                    // 计算节点位置，使节点更靠近视图中心
-                    const x = depth * 100; // 减少每级缩进，从200px改为100px
-                    const y = currentY;
-                    currentY += yStep;
+                    // 计算节点位置，使节点更靠近上级节点
+                    let x = 0;
+                    let y = 0;
+                    
+                    if (stack.length > 0) {
+                        // 图片节点位置：在父节点右侧
+                        const parentId = stack[stack.length - 1];
+                        const parentPos = nodePositions[parentId];
+                        if (parentPos) {
+                            // 图片节点在父节点右侧 150px 处（更靠近父节点）
+                            x = parentPos.x + 150;
+                            
+                            // 计算垂直位置，为每个子节点添加偏移，避免重叠
+                            const childCount = childCounts[parentId] || 0;
+                            y = parentPos.y + (childCount * (yStep / 2)); // 子节点之间的间距为 yStep/2
+                            
+                            // 更新父节点的子节点计数
+                            childCounts[parentId] = childCount + 1;
+                        }
+                    } else {
+                        // 根节点位置：中心
+                        x = 0;
+                        y = 0;
+                    }
                     
                     const node: MindMapNode = {
                         id: nodeId,
@@ -200,8 +294,8 @@ export const parseMarkdown = (markdown: string): { nodes: MindMapNode[], edges: 
                         content: '',
                         imageUrl: '', // 实际的图片 URL 需要在视图中通过 onResolveResource 处理
                         assetPath: assetPath,
-                        x: x - 100, // 向左偏移100px，使根节点更靠近中心
-                        y: y - 100, // 向上偏移100px，使根节点更靠近中心
+                        x: x - 100, // 向左偏移节点宽度的一半，使节点中心对齐计算位置
+                        y: y - 75, // 向上偏移节点高度的一半，使节点中心对齐计算位置
                         width: 200,
                         height: 150,
                         color: color,

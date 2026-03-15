@@ -112,10 +112,12 @@ const getStepPoints = (start: Position, end: Position, sourceHandle: HandlePosit
 
 const getStepPath = (start: Position, end: Position, sourceHandle: HandlePosition, targetHandle: HandlePosition): string => {
     const points = getStepPoints(start, end, sourceHandle, targetHandle);
-    let d = `M ${points[0].x} ${points[0].y}`;
-    for (let i = 1; i < points.length; i++) {
+    // 从start开始，到end结束，但使用中间的控制点
+    let d = `M ${start.x} ${start.y}`;
+    for (let i = 1; i < points.length - 1; i++) {
         d += ` L ${points[i].x} ${points[i].y}`;
     }
+    d += ` L ${end.x} ${end.y}`;
     return d;
 };
 
@@ -352,6 +354,11 @@ export const calculateRelationshipWeights = (nodes: MindMapNode[], edges: MindMa
 // Update edge styles based on relationship type and layout needs
 export const updateEdgeStyles = (edges: MindMapEdge[], nodes: MindMapNode[]): MindMapEdge[] => {
   return edges.map(edge => {
+    // 如果边缘已经有类型信息，保持不变
+    if (edge.type) {
+      return edge;
+    }
+    
     const sourceNode = nodes.find(n => n.id === edge.from);
     const targetNode = nodes.find(n => n.id === edge.to);
     let style: EdgeStyle = 'solid';

@@ -63,9 +63,157 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = ({
   
   // Backwards compatibility for single control point
   const breakpoints = edge.breakpoints || (edge.controlPoint ? [edge.controlPoint] : []);
+  
+  // 调整线条位置，将线条向后移动1个像素，与节点之间保持距离
+  const lineOffset = 1;
+  
+  // 计算调整后的点位置
+  const calculateAdjustedPoint = (point: Position, isStart: boolean) => {
+    let angle = 0;
+    if (edge.type === 'step') {
+      const handle = isStart ? edge.fromHandle : edge.toHandle;
+      switch (handle) {
+        case 'top': angle = 90; break;
+        case 'bottom': angle = 270; break;
+        case 'left': angle = 0; break;
+        case 'right': angle = 180; break;
+      }
+    } else {
+      const target = isStart 
+        ? (breakpoints.length > 0 ? breakpoints[0] : end) 
+        : (breakpoints.length > 0 ? breakpoints[breakpoints.length - 1] : start);
+      angle = Math.atan2(target.y - point.y, target.x - point.x) * (180 / Math.PI);
+    }
+    
+    const radians = angle * Math.PI / 180;
+    return {
+      x: point.x + Math.cos(radians) * lineOffset,
+      y: point.y + Math.sin(radians) * lineOffset
+    };
+  };
+  
+  const adjustedStart = calculateAdjustedPoint(start, true);
+  const adjustedEnd = calculateAdjustedPoint(end, false);
 
-  // Path Generation
-  const pathD = getEdgePath(finalSourceNode, finalTargetNode, edge.fromHandle, edge.toHandle, edge.controlPoint, edge.type, breakpoints);
+  // 生成调整后的路径
+  const generateAdjustedPath = () => {
+    // Step 类型路径
+    if (edge.type === 'step') {
+      return generateStepPath();
+    }
+    // 直线类型路径
+    else if (edge.type === 'straight') {
+      return generateStraightPath();
+    }
+    // 贝塞尔曲线类型路径
+    else {
+      return generateBezierPath();
+    }
+  };
+  
+  // 生成 Step 类型路径
+  const generateStepPath = () => {
+    const offset = 20;
+    let pStart = { ...adjustedStart };
+    let pEnd = { ...adjustedEnd };
+    
+    // 计算中间点
+    switch(edge.fromHandle) {
+      case 'top': pStart.y -= offset; break;
+      case 'bottom': pStart.y += offset; break;
+      case 'left': pStart.x -= offset; break;
+      case 'right': pStart.x += offset; break;
+    }
+
+    switch(edge.toHandle) {
+      case 'top': pEnd.y -= offset; break;
+      case 'bottom': pEnd.y += offset; break;
+      case 'left': pEnd.x -= offset; break;
+      case 'right': pEnd.x += offset; break;
+    }
+
+    const midX = (pStart.x + pEnd.x) / 2;
+    const midY = (pStart.y + pEnd.y) / 2;
+    const startVertical = edge.fromHandle === 'top' || edge.fromHandle === 'bottom';
+    const endVertical = edge.toHandle === 'top' || edge.toHandle === 'bottom';
+
+    let d = `M ${adjustedStart.x} ${adjustedStart.y}`;
+    d += ` L ${pStart.x} ${pStart.y}`;
+
+    if (startVertical === endVertical) {
+      if (startVertical) {
+        d += ` L ${pStart.x} ${midY}`;
+        d += ` L ${pEnd.x} ${midY}`;
+      } else {
+        d += ` L ${midX} ${pStart.y}`;
+        d += ` L ${midX} ${pEnd.y}`;
+      }
+    } else {
+      if (startVertical) {
+        d += ` L ${pStart.x} ${pEnd.y}`;
+      } else {
+        d += ` L ${pEnd.x} ${pStart.y}`;
+      }
+    }
+
+    d += ` L ${pEnd.x} ${pEnd.y}`;
+    d += ` L ${adjustedEnd.x} ${adjustedEnd.y}`;
+    return d;
+  };
+  
+  // 生成直线类型路径
+  const generateStraightPath = () => {
+    let d = `M ${adjustedStart.x} ${adjustedStart.y}`;
+    breakpoints.forEach(p => {
+      d += ` L ${p.x} ${p.y}`;
+    });
+    d += ` L ${adjustedEnd.x} ${adjustedEnd.y}`;
+    return d;
+  };
+  
+  // 生成贝塞尔曲线类型路径
+  const generateBezierPath = () => {
+    if (breakpoints.length > 0) {
+      if (breakpoints.length === 1) {
+        return `M ${adjustedStart.x} ${adjustedStart.y} Q ${breakpoints[0].x} ${breakpoints[0].y} ${adjustedEnd.x} ${adjustedEnd.y}`;
+      }
+      let d = `M ${adjustedStart.x} ${adjustedStart.y}`;
+      breakpoints.forEach(p => {
+        d += ` L ${p.x} ${p.y}`;
+      });
+      d += ` L ${adjustedEnd.x} ${adjustedEnd.y}`;
+      return d;
+    }
+    
+    if (edge.controlPoint) {
+      return `M ${adjustedStart.x} ${adjustedStart.y} Q ${edge.controlPoint.x} ${edge.controlPoint.y} ${adjustedEnd.x} ${adjustedEnd.y}`;
+    }
+    
+    // 默认贝塞尔曲线
+    const dist = Math.sqrt(Math.pow(adjustedEnd.x - adjustedStart.x, 2) + Math.pow(adjustedEnd.y - adjustedStart.y, 2));
+    const controlOffset = Math.min(dist * 0.5, 100);
+
+    let cp1 = { ...adjustedStart };
+    let cp2 = { ...adjustedEnd };
+
+    switch (edge.fromHandle) {
+      case 'top': cp1.y -= controlOffset; break;
+      case 'bottom': cp1.y += controlOffset; break;
+      case 'left': cp1.x -= controlOffset; break;
+      case 'right': cp1.x += controlOffset; break;
+    }
+
+    switch (edge.toHandle) {
+      case 'top': cp2.y -= controlOffset; break;
+      case 'bottom': cp2.y += controlOffset; break;
+      case 'left': cp2.x -= controlOffset; break;
+      case 'right': cp2.x += controlOffset; break;
+    }
+
+    return `M ${adjustedStart.x} ${adjustedStart.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${adjustedEnd.x} ${adjustedEnd.y}`;
+  };
+  
+  const pathD = generateAdjustedPath();
   
   const strokeColor = edge.color || '#94a3b8';
   const strokeWidth = finalIsSelected || isHovered ? 3 : 2;
@@ -140,6 +288,19 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = ({
                angle = getCubicAngleAtT(start, cp1, cp2, end, 1);
                pos = end;
            }
+      }
+
+      // 调整箭头位置，让箭头往前移动2个像素
+      const arrowOffset = 2;
+      const radians = angle * Math.PI / 180;
+      if (position === 'end') {
+          // 对于终点箭头，沿着箭头指向的方向移动
+          pos.x = end.x + Math.cos(radians) * arrowOffset;
+          pos.y = end.y + Math.sin(radians) * arrowOffset;
+      } else {
+          // 对于起点箭头，沿着箭头指向的方向移动
+          pos.x = start.x + Math.cos(radians) * arrowOffset;
+          pos.y = start.y + Math.sin(radians) * arrowOffset;
       }
 
       return (
@@ -240,7 +401,9 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = ({
             strokeLinejoin="round"
             style={{ 
                 filter: finalIsSelected ? `drop-shadow(0 0 3px ${strokeColor})` : 'none',
-                opacity: isHovered || finalIsSelected ? 1 : 0.8
+                opacity: isHovered || finalIsSelected ? 1 : 0.8,
+                // 将线条向后移动3个像素，避免超出箭头
+                transform: `translate(0, 0)`
             }}
         />
 

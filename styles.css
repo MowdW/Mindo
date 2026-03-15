@@ -577,6 +577,58 @@
   background: var(--background-modifier-border) !important;
   color: var(--text-muted) !important;
 }
+.mindo-text-editor-toolbar {
+  display: flex;
+  align-items: center;
+  background-color: var(--background-primary);
+  padding: 6px 12px;
+  border-radius: 9999px;
+  box-shadow:
+    0 10px 15px -3px rgba(0, 0, 0, 0.1),
+    0 4px 6px -2px rgba(0, 0, 0, 0.05),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  gap: 8px;
+  z-index: 100;
+}
+.theme-dark .mindo-text-editor-toolbar {
+  background-color: var(--background-secondary);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.mindo-text-editor-toolbar .mindo-toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  border: none !important;
+  background-color: var(--background-primary) !important;
+  color: var(--text-normal) !important;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  padding: 0;
+  box-shadow: none !important;
+  outline: none !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  transform: none !important;
+  position: relative;
+  overflow: hidden;
+}
+.theme-dark .mindo-text-editor-toolbar .mindo-toolbar-btn {
+  background-color: var(--background-secondary) !important;
+  color: var(--text-normal) !important;
+}
+.mindo-text-editor-toolbar .mindo-toolbar-btn:hover {
+  background-color: var(--background-modifier-hover) !important;
+}
+.mindo-text-editor-toolbar .mindo-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background-color: var(--background-modifier-border);
+  margin: 0 4px;
+}
 .mindo-ai-btn .animate-spin {
   animation: spin 1s linear infinite;
 }

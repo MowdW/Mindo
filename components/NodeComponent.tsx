@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useLayoutEffect } from 'react';
 import { MindMapNode, NODE_STYLES, NodeColor, HandlePosition, COLOR_PALETTE } from '../types';
 import { Trash2 } from 'lucide-react';
-import { CodeMirrorEditor } from './CodeMirrorEditor';
+import { TextEditorToolbar } from './TextEditorToolbar';
 
 interface NodeComponentProps {
   node: MindMapNode;
@@ -22,7 +22,6 @@ interface NodeComponentProps {
   scale: number;
   onRenderMarkdown?: (content: string, el: HTMLElement) => void;
   onOpenLink?: (linkPath: string) => void;
-  useCodeMirror?: boolean;
   darkMode?: boolean;
 }
 
@@ -45,7 +44,6 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
   scale,
   onRenderMarkdown,
   onOpenLink,
-  useCodeMirror = false,
   darkMode = false
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -134,6 +132,104 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
     }
   }, [isEditing, focusTarget]);
 
+  const handleFormat = (type: 'bold' | 'italic' | 'strikethrough' | 'highlight' | 'clear') => {
+    const textarea = contentInputRef.current;
+    if (!textarea) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selectedText = textarea.value.substring(start, end);
+    let newText = textarea.value;
+
+    switch (type) {
+      case 'bold':
+        if (selectedText) {
+          newText = newText.substring(0, start) + `**${selectedText}**` + newText.substring(end);
+        } else {
+          newText = newText.substring(0, start) + '****' + newText.substring(start);
+        }
+        break;
+      case 'italic':
+        if (selectedText) {
+          newText = newText.substring(0, start) + `*${selectedText}*` + newText.substring(end);
+        } else {
+          newText = newText.substring(0, start) + '**' + newText.substring(start);
+        }
+        break;
+      case 'strikethrough':
+        if (selectedText) {
+          newText = newText.substring(0, start) + `~~${selectedText}~~` + newText.substring(end);
+        } else {
+          newText = newText.substring(0, start) + '~~~~' + newText.substring(start);
+        }
+        break;
+      case 'highlight':
+        if (selectedText) {
+          newText = newText.substring(0, start) + `==${selectedText}==` + newText.substring(end);
+        } else {
+          newText = newText.substring(0, start) + '====' + newText.substring(start);
+        }
+        break;
+      case 'clear':
+        if (selectedText) {
+          // 清除选中文本的格式
+          let cleanedText = selectedText
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/~~(.*?)~~/g, '$1')
+            .replace(/==(.*?)==/g, '$1');
+          newText = newText.substring(0, start) + cleanedText + newText.substring(end);
+        } else {
+          // 清除所有文本的格式
+          newText = newText
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/~~(.*?)~~/g, '$1')
+            .replace(/==(.*?)==/g, '$1');
+        }
+        break;
+    }
+
+    textarea.value = newText;
+    adjustTextareaHeight();
+
+    // 设置光标位置
+    if (!selectedText) {
+      let cursorPos = start;
+      switch (type) {
+        case 'bold':
+        case 'strikethrough':
+        case 'highlight':
+          cursorPos += 2;
+          break;
+        case 'italic':
+          cursorPos += 1;
+          break;
+      }
+      textarea.setSelectionRange(cursorPos, cursorPos);
+    } else {
+      let newCursorPos = start;
+      switch (type) {
+        case 'bold':
+          newCursorPos += 2 + selectedText.length + 2;
+          break;
+        case 'italic':
+          newCursorPos += 1 + selectedText.length + 1;
+          break;
+        case 'strikethrough':
+        case 'highlight':
+          newCursorPos += 2 + selectedText.length + 2;
+          break;
+        case 'clear':
+          newCursorPos += selectedText.length - (selectedText.length - newText.substring(start, end + (newText.length - textarea.value.length)).length);
+          break;
+      }
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
+    }
+
+    textarea.focus();
+  };
+
   const saveChanges = () => {
     const newTitle = titleInputRef.current?.value ?? node.title;
     const newContent = contentInputRef.current?.value ?? node.content ?? "";
@@ -160,7 +256,9 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
   };
 
   const handleBlur = (e: React.FocusEvent) => {
-    if (nodeRef.current && nodeRef.current.contains(e.relatedTarget as Node)) {
+    // 检查相关目标是否在节点内部或工具栏内部
+    const relatedTarget = e.relatedTarget as HTMLElement;
+    if (nodeRef.current && (nodeRef.current.contains(relatedTarget) || relatedTarget?.closest('.mindo-text-editor-toolbar'))) {
         return;
     }
     setIsEditing(false);
@@ -168,6 +266,20 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // 格式化快捷键
+    if ((e.metaKey || e.ctrlKey)) {
+      switch (e.key) {
+        case 'b':
+          e.preventDefault();
+          handleFormat('bold');
+          return;
+        case 'i':
+          e.preventDefault();
+          handleFormat('italic');
+          return;
+      }
+    }
+    
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { 
        setIsEditing(false);
        saveChanges();
@@ -295,27 +407,54 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
 
   return (
     <div
-      ref={nodeRef}
-      className={`mindo-node ${themeClass}
-        ${isDragging ? 'dragging' : ''}
-        ${isSelected ? 'selected' : ''}
-      `}
       style={{
-        transform: `translate(${node.x}px, ${node.y}px)`,
+        position: 'absolute',
+        left: node.x,
+        top: node.y,
+        zIndex: isSelected ? 10 : 1,
         width: node.width,
-        height: isImage ? Math.max(node.height, 100) : 'auto',
-        minHeight: isImage ? Math.max(node.height, 100) : 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        willChange: isDragging ? 'transform' : 'auto'
+        textAlign: 'center'
       }}
-      onMouseDown={(e) => onMouseDown(e, node.id)}
-      onMouseUp={(e) => onMouseUp(e, node.id)}
-      onDoubleClick={handleDoubleClick}
-      onContextMenu={(e) => onContextMenu && onContextMenu(e, node.id)}
-      tabIndex={-1} 
-      onBlur={handleBlur}
     >
+      {/* 文本编辑工具栏 */}
+      {isEditing && !isGroup && !isImage && (
+        <div style={{
+          position: 'absolute',
+          top: '-40px',
+          left: '0',
+          right: '0',
+          display: 'flex',
+          justifyContent: 'center',
+          zIndex: 100
+        }}>
+          <TextEditorToolbar 
+            onFormat={handleFormat} 
+            darkMode={darkMode} 
+          />
+        </div>
+      )}
+      
+      <div
+        ref={nodeRef}
+        className={`mindo-node ${themeClass}
+          ${isDragging ? 'dragging' : ''}
+          ${isSelected ? 'selected' : ''}
+        `}
+        style={{
+          width: '100%',
+          height: isImage ? Math.max(node.height, 100) : 'auto',
+          minHeight: isImage ? Math.max(node.height, 100) : 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          willChange: isDragging ? 'transform' : 'auto'
+        }}
+        onMouseDown={(e) => onMouseDown(e, node.id)}
+        onMouseUp={(e) => onMouseUp(e, node.id)}
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={(e) => onContextMenu && onContextMenu(e, node.id)}
+        tabIndex={-1} 
+        onBlur={handleBlur}
+      >
       {/* Icon - Corner Position */}
       {node.icon && (node.iconPosition === 'corner' || !node.iconPosition) && (
         <div style={{
@@ -401,7 +540,7 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
 
       {/* Content */}
       {showContent && (
-        <div className="mindo-node-content" style={{ height: isImage ? (showTitle ? 'calc(100% - 44px)' : '100%') : 'auto', overflow: isImage ? 'hidden' : 'visible' }}>
+        <div className="mindo-node-content" style={{ height: isImage ? (showTitle ? 'calc(100% - 44px)' : '100%') : 'auto', overflow: isImage ? 'hidden' : 'visible', textAlign: 'left' }}>
              {isImage ? (
                  <img 
                     src={node.imageUrl} 
@@ -411,39 +550,18 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
              ) : (
                  <>
                     {isEditing ? (
-                        useCodeMirror ? (
-                            <CodeMirrorEditor
-                                value={node.content || ''}
-                                onChange={(value) => {
-                                    // 直接更新内容，不需要等待失焦
-                                    onUpdate(node.id, node.title, value);
-                                }}
-                                language="markdown"
-                                theme={darkMode ? 'dark' : 'light'}
-                                placeholder="描述..."
-                                className="mindo-codemirror-editor"
-                                style={{ 
-                                    width: '100%', 
-                                    height: 'auto', 
-                                    minHeight: '100px',
-                                    color: 'inherit',
-                                    fontSize: '14px'
-                                }}
-                            />
-                        ) : (
                             <textarea
                                 ref={contentInputRef}
                                 defaultValue={node.content}
                                 placeholder="描述..."
                                 className="mindo-input-reset mindo-editing-mono"
-                                style={{ width: '100%', resize: 'none', color: 'inherit', padding: 0, margin: 0, overflow: 'hidden', height: 'auto', minHeight: '1.5em' }}
+                                style={{ width: '100%', resize: 'none', color: 'inherit', padding: 0, margin: 0, overflow: 'hidden', height: 'auto', minHeight: '1.5em', textAlign: 'left' }}
                                 onInput={adjustTextareaHeight}
                                 onKeyDown={handleKeyDown}
                                 onMouseDown={stopProp}
                             />
-                        )
                     ) : (
-                        <div ref={markdownRef} className="mindo-markdown-content" onClick={handleLinkClick}>
+                        <div ref={markdownRef} className="mindo-markdown-content" style={{ textAlign: 'left' }} onClick={handleLinkClick}>
                             {!onRenderMarkdown && node.content}
                         </div>
                     )}
@@ -466,6 +584,7 @@ export const NodeComponent: React.FC<NodeComponentProps> = ({
       <div className="mindo-handle mindo-handle-left" onMouseDown={(e) => handleHandleMouseDown(e, 'left')} onMouseUp={(e) => handleHandleMouseUp(e, 'left')} />
 
 
+    </div>
     </div>
   );
 };

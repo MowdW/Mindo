@@ -26,11 +26,6 @@ export interface MindoSettings {
   // New Image Settings
   imageSaveLocation: 'obsidian' | 'folder';
   imageFolderPath: string;
-  // Layout Settings
-  layoutRepulsionForce: number;
-  layoutAttractionForce: number;
-  layoutMinDistance: number;
-  layoutIterations: number;
 }
 
 export interface MindMapNode {

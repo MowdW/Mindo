@@ -2,6 +2,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { MindMapNode, MindMapEdge, ViewportTransform, Position, HandlePosition, MindoSettings, NodeColor, EdgeStyle, EdgeArrow, NODE_STYLES, LayoutType, IconPosition } from './types';
 import { generateId, screenToWorld, getHandlePosition, getNearestHandle, getCenter, getBezierMidpoint, getClosestHandlePair, calculateAutomaticLayout, calculateRelationshipWeights, updateEdgeStyles } from './utils/geometry';
+import { generateStableId } from './utils/markdownExport';
 import { NodeComponent } from './components/NodeComponent';
 import { EdgeComponent, EdgeMenu, EdgeLabel } from './components/EdgeComponent';
 import { Toolbar } from './components/Toolbar';
@@ -12,13 +13,8 @@ import { NodeMenu } from './components/NodeMenu';
 import { ImageOperationModal, ImageOperationOptions } from './components/ImageOperationModal';
 import * as htmlToImage from 'html-to-image';
 
-import { MarkdownView } from './components/MarkdownView';
 import { IconType } from './types';
 
-
-
-
-import { generateMarkdown, parseMarkdown } from './utils/markdownExport';
 import { brainstorm, deepenContent } from './services/aiService';
 
 import './styles.css';
@@ -29,11 +25,9 @@ interface AppProps {
     fileName: string;
     settings: MindoSettings;
     onShowMessage?: (message: string) => void;
-    onRenderMarkdown?: (content: string, el: HTMLElement) => void;
     onSaveAsset?: (file: File) => Promise<string>; // Returns vault path
     onRenameAsset?: (oldPath: string, newName: string) => Promise<string>; // Handle renaming
     onResolveResource?: (path: string) => string; // Returns displayable URL
-    onSaveMarkdown?: (filename: string, content: string) => void;
     onOpenLink?: (linkPath: string) => void; // Handle opening links
     app?: any; // Obsidian app object
 }
@@ -57,7 +51,6 @@ const App: React.FC<AppProps> = ({
     onSaveAsset,
     onRenameAsset,
     onResolveResource,
-    onSaveMarkdown,
     onOpenLink,
     app
 }) => {
@@ -103,6 +96,14 @@ const App: React.FC<AppProps> = ({
   const [snapToGrid, setSnapToGrid] = useState(true); // 对齐功能开关
   const [autoSelectNearestHandle, setAutoSelectNearestHandle] = useState(true); // 连接线自动选择最近连接点的开关
   
+  // Layout settings state
+  const [layoutSettings, setLayoutSettings] = useState({
+    repulsionForce: 500000,
+    attractionForce: 0.03,
+    minDistance: 300,
+    iterations: 300
+  });
+  
   // File search state
   const [showSearchBox, setShowSearchBox] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -110,10 +111,6 @@ const App: React.FC<AppProps> = ({
   const [isSearching, setIsSearching] = useState(false);
   
 
-  
-  // View state
-  const [currentView, setCurrentView] = useState<'mindmap' | 'markdown'>('mindmap');
-  const [markdownContent, setMarkdownContent] = useState('');
   
   // Image operation modal reference
   const imageOperationModalRef = useRef<ImageOperationModal | null>(null);
@@ -138,8 +135,8 @@ const App: React.FC<AppProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasContentRef = useRef<HTMLDivElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
-  // wrapper for markdown view scroll handling
-  const markdownWrapperRef = useRef<HTMLDivElement>(null);
+  // ref for mindmap view container
+  const mindmapContainerRef = useRef<HTMLDivElement>(null);
   const dragStartRef = useRef<Position>({ x: 0, y: 0 }); 
   const itemStartRef = useRef<Position>({ x: 0, y: 0 });
   const hasCentered = useRef(false);
@@ -199,28 +196,7 @@ const App: React.FC<AppProps> = ({
     return () => observer.disconnect();
   }, []);
 
-  // non-passive wheel listener for markdown scrolling
-  useEffect(() => {
-    const el = markdownWrapperRef.current;
-    if (el) {
-      const listener = (e: WheelEvent) => {
-        if (currentView === 'markdown') {
-          // 直接滚动容器，确保即使 CodeMirror 获得焦点也能正常滚动
-          el.scrollTop += e.deltaY;
-          e.preventDefault();
-        }
-      };
-      
-      // 只为 Markdown 视图容器添加滚动事件监听器
-      // 这样只会影响 Markdown 视图区域，不会影响整个 Obsidian
-      el.addEventListener('wheel', listener, { passive: false });
-      
-      return () => {
-        el.removeEventListener('wheel', listener);
-      };
-    }
-    return;
-  }, [currentView]);
+
 
   // Sync with Prop Updates & Resolve Asset Paths
   useEffect(() => {
@@ -385,18 +361,8 @@ const App: React.FC<AppProps> = ({
   }, [future]);
 
 
-  // --- Handlers ---
+  // --- Handlers ---  
   const handleWheel = (e: React.WheelEvent) => {
-    // if markdown view, handle scroll directly
-    if (currentView === 'markdown') {
-      const el = markdownWrapperRef.current;
-      if (el) {
-        el.scrollTop += e.deltaY;
-        e.preventDefault();
-      }
-      return;
-    }
-
     // zoom mindmap
     if (!hasCentered.current) hasCentered.current = true;
 
@@ -434,7 +400,7 @@ const App: React.FC<AppProps> = ({
             setSelectedEdgeId(null);
             setSelectedNodeForMenu(null);
         }
-        const rect = containerRef.current?.getBoundingClientRect();
+        const rect = mindmapContainerRef.current?.getBoundingClientRect();
         if (rect) {
             const startPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
             setSelectionBox({ start: startPos, end: startPos });
@@ -806,8 +772,8 @@ const App: React.FC<AppProps> = ({
     closeContextMenu();
   };
 
-  const handleExportImage = useCallback(async (options: ImageOperationOptions) => {
-    if (currentView !== "mindmap" || canvasContainerRef.current === null || canvasContentRef.current === null) {
+  const handleExportImage = useCallback(async (options: { resolution: number; margin: number }) => {
+    if (canvasContainerRef.current === null || canvasContentRef.current === null) {
       return;
     }
     try {
@@ -821,10 +787,19 @@ const App: React.FC<AppProps> = ({
       });
       
       // 计算内容中心和尺寸
-      const contentWidth = maxX - minX + 100; // 增加边距
-      const contentHeight = maxY - minY + 100;
-      const centerX = (minX + maxX) / 2;
-      const centerY = (minY + maxY) / 2;
+      let contentWidth, contentHeight, centerX, centerY;
+      if (nodes.length === 0) {
+        // 当没有节点时，使用默认值
+        contentWidth = 800;
+        contentHeight = 600;
+        centerX = 400;
+        centerY = 300;
+      } else {
+        contentWidth = maxX - minX + 100; // 增加边距
+        contentHeight = maxY - minY + 100;
+        centerX = (minX + maxX) / 2;
+        centerY = (minY + maxY) / 2;
+      }
       
       // 设置导出区域大小
       const exportWidth = Math.max(contentWidth, 800);
@@ -913,10 +888,10 @@ const App: React.FC<AppProps> = ({
     } catch (err) {
       console.error("Export failed", err);
     }
-  }, [fileName, currentView, nodes, currentBackground]);
+  }, [fileName, nodes, currentBackground]);
 
-  const handleCopyImage = useCallback(async (options: ImageOperationOptions) => {
-    if (currentView !== "mindmap" || nodes.length === 0 || canvasContainerRef.current === null) {
+  const handleCopyImage = useCallback(async (options: { resolution: number; margin: number }) => {
+    if (nodes.length === 0 || canvasContainerRef.current === null) {
       if (onShowMessage) onShowMessage('复制图片失败');
       return;
     }
@@ -1080,7 +1055,7 @@ const App: React.FC<AppProps> = ({
         console.error('Copy image failed', err);
         if (onShowMessage) onShowMessage('复制图片失败');
     }
-  }, [onShowMessage, currentView, nodes, edges, darkMode, currentBackground, canvasContainerRef]);
+  }, [onShowMessage, nodes, edges, darkMode, currentBackground, canvasContainerRef]);
 
   const handleOpenImageOperationModal = useCallback(() => {
     if (app) {
@@ -1109,16 +1084,61 @@ const App: React.FC<AppProps> = ({
     }
   }, [app, handleExportImage, handleCopyImage]);
 
+  // 计算节点在树中的深度
+  const calculateNodeDepth = (nodeId: string): number => {
+    let depth = 0;
+    let currentId = nodeId;
+    
+    // 遍历父节点链，计算深度
+    while (true) {
+      const parentEdge = edges.find(edge => edge.to === currentId);
+      if (!parentEdge) break;
+      currentId = parentEdge.from;
+      depth++;
+    }
+    
+    return depth;
+  };
+
+  // 获取下一个可用的节点标题序号
+  const getNextNodeTitleIndex = (baseTitle: string, nodes: MindMapNode[]): number => {
+    let maxIndex = 0;
+    const regex = new RegExp(`^${baseTitle}(\\d+)$`);
+    
+    nodes.forEach(node => {
+      const match = node.title.match(regex);
+      if (match) {
+        const index = parseInt(match[1], 10);
+        if (index > maxIndex) {
+          maxIndex = index;
+        }
+      } else if (node.title === baseTitle) {
+        // 处理没有序号的情况，视为序号0
+        maxIndex = Math.max(maxIndex, 0);
+      }
+    });
+    
+    return maxIndex + 1;
+  };
+
+  // 生成带序号的节点标题
+  const generateNodeTitle = (baseTitle: string, nodes: MindMapNode[]): string => {
+    const index = getNextNodeTitleIndex(baseTitle, nodes);
+    return `${baseTitle}${index}`;
+  };
+
   const handleDoubleClickCanvas = (e: React.MouseEvent) => {
     saveHistory(); // History: Node Add
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = mindmapContainerRef.current?.getBoundingClientRect();
     if (!rect) return;
     
     const mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const worldPos = screenToWorld(mousePos, transform);
+    const baseTitle = '新节点';
+    const title = generateNodeTitle(baseTitle, nodes);
     const newNode: MindMapNode = {
-      id: generateId(),
-      title: '新节点',
+      id: generateId(), // 使用随机ID，确保唯一性
+      title: title,
       content: '',
       x: worldPos.x - 50, 
       y: worldPos.y - 40,
@@ -1309,41 +1329,16 @@ const App: React.FC<AppProps> = ({
     saveHistory(); 
     const selectedNodes = nodes.filter(n => selectedNodeIds.has(n.id));
     if (selectedNodes.length === 0) return;
-    selectedNodes.sort((a, b) => a.y - b.y || a.x - b.x);
-    const columns = Math.ceil(Math.sqrt(selectedNodes.length));
-    const GAP = 20;
-    let currentX = 0;
-    let currentY = 0;
-    let rowMaxHeight = 0;
-    const minX = Math.min(...selectedNodes.map(n => n.x));
-    const minY = Math.min(...selectedNodes.map(n => n.y));
-    const layoutMap = new Map<string, Position>();
-    selectedNodes.forEach((node, index) => {
-        if (index > 0 && index % columns === 0) {
-            currentX = 0;
-            currentY += rowMaxHeight + GAP;
-            rowMaxHeight = 0;
-        }
-        layoutMap.set(node.id, { x: minX + currentX, y: minY + currentY });
-        currentX += node.width + GAP;
-        rowMaxHeight = Math.max(rowMaxHeight, node.height);
-    });
-    let updatedNodes = nodes.map(n => {
-        if (layoutMap.has(n.id)) {
-            const pos = layoutMap.get(n.id)!;
-            return { ...n, x: pos.x, y: pos.y };
-        }
-        return n;
-    });
-    const newGroupId = generateId();
+    
+    // 直接使用节点的原始位置，不进行重新排列
     let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
     selectedNodes.forEach(n => {
-        const pos = layoutMap.get(n.id)!;
-        gMinX = Math.min(gMinX, pos.x);
-        gMinY = Math.min(gMinY, pos.y);
-        gMaxX = Math.max(gMaxX, pos.x + n.width);
-        gMaxY = Math.max(gMaxY, pos.y + n.height);
+        gMinX = Math.min(gMinX, n.x);
+        gMinY = Math.min(gMinY, n.y);
+        gMaxX = Math.max(gMaxX, n.x + n.width);
+        gMaxY = Math.max(gMaxY, n.y + n.height);
     });
+    const newGroupId = generateId();
     const PADDING = 40;
     const TITLE_OFFSET = 40;
     const groupNode: MindMapNode = {
@@ -1357,7 +1352,7 @@ const App: React.FC<AppProps> = ({
         height: (gMaxY - gMinY) + (PADDING * 2) + TITLE_OFFSET,
         color: 'gray'
     };
-    updatedNodes = updatedNodes.map(n => {
+    const updatedNodes = nodes.map(n => {
         if (selectedNodeIds.has(n.id)) {
             return { ...n, parentId: newGroupId };
         }
@@ -1494,7 +1489,7 @@ const App: React.FC<AppProps> = ({
   };
   const handleConnectStart = (e: React.MouseEvent, nodeId: string, handle: HandlePosition) => {
     setConnectionStart({ nodeId, handle });
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = mindmapContainerRef.current?.getBoundingClientRect();
     if (rect) {
        const mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
        const worldPos = screenToWorld(mousePos, transform);
@@ -1507,7 +1502,7 @@ const App: React.FC<AppProps> = ({
       const edge = edges.find(ed => ed.id === edgeId);
       if(!edge) return;
       setReconnectingEdge({ edgeId, which });
-      const rect = containerRef.current?.getBoundingClientRect();
+      const rect = mindmapContainerRef.current?.getBoundingClientRect();
       if (rect) {
         const mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
         const worldPos = screenToWorld(mousePos, transform);
@@ -1571,9 +1566,10 @@ const App: React.FC<AppProps> = ({
                }));
            } 
            else if (selectionBox) {
-               const rect = containerRef.current?.getBoundingClientRect();
+               const rect = mindmapContainerRef.current?.getBoundingClientRect();
                if (rect) {
-                   setSelectionBox(prev => prev ? ({ ...prev, end: { x: clientX - rect.left, y: clientY - rect.top } }) : null);
+                   const endPos = { x: clientX - rect.left, y: clientY - rect.top };
+                   setSelectionBox(prev => prev ? ({ ...prev, end: endPos }) : null);
                }
            }
            else if (draggingNodeId) {
@@ -1617,8 +1613,8 @@ const App: React.FC<AppProps> = ({
                   return n;
               }));
            } 
-           else if (connectionStart && containerRef.current) {
-              const rect = containerRef.current.getBoundingClientRect();
+           else if (connectionStart && mindmapContainerRef.current) {
+              const rect = mindmapContainerRef.current.getBoundingClientRect();
               const mousePos = { x: clientX - rect.left, y: clientY - rect.top };
               const worldPos = screenToWorld(mousePos, currentTransform);
               setTempConnectionEnd(worldPos);
@@ -1629,8 +1625,8 @@ const App: React.FC<AppProps> = ({
                 setSnapPreview(null);
               }
            }
-           else if (reconnectingEdge && containerRef.current) {
-              const rect = containerRef.current.getBoundingClientRect();
+           else if (reconnectingEdge && mindmapContainerRef.current) {
+              const rect = mindmapContainerRef.current.getBoundingClientRect();
               const mousePos = { x: clientX - rect.left, y: clientY - rect.top };
               const worldPos = screenToWorld(mousePos, currentTransform);
               setTempConnectionEnd(worldPos);
@@ -2046,9 +2042,14 @@ const App: React.FC<AppProps> = ({
           const selectedNode = nodes.find(n => n.id === selectedNodeId);
           if (selectedNode) {
             saveHistory();
-            const newNode: MindMapNode = {
-              id: generateId(),
-              title: '新子节点',
+            // 计算父节点的深度，子节点深度为父节点深度+1
+            const parentDepth = calculateNodeDepth(selectedNode.id);
+            const childDepth = parentDepth + 1;
+            const baseTitle = '新子节点';
+              const title = generateNodeTitle(baseTitle, nodes);
+              const newNode: MindMapNode = {
+              id: generateId(), // 使用随机ID，确保唯一性
+              title: title,
               content: '',
               x: selectedNode.x,
               y: selectedNode.y + selectedNode.height + 40,
@@ -2085,9 +2086,13 @@ const App: React.FC<AppProps> = ({
           const selectedNode = nodes.find(n => n.id === selectedNodeId);
           if (selectedNode) {
             saveHistory();
+            // 计算同级节点的深度（与当前节点相同）
+            const siblingDepth = calculateNodeDepth(selectedNode.id);
+            const baseTitle = '新同级节点';
+            const title = generateNodeTitle(baseTitle, nodes);
             const newNode: MindMapNode = {
-              id: generateId(),
-              title: '新同级节点',
+              id: generateId(), // 使用随机ID，确保唯一性
+              title: title,
               content: '',
               x: selectedNode.x + selectedNode.width + 40,
               y: selectedNode.y,
@@ -2128,7 +2133,7 @@ const App: React.FC<AppProps> = ({
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteSelected, undo, redo, handleCopy, handlePaste, nodes, edges, selectedNodeIds, saveHistory, generateId]);
+  }, [deleteSelected, undo, redo, handleCopy, handlePaste, nodes, edges, selectedNodeIds, saveHistory, generateId, generateStableId]);
 
   // AI expand functionality is now available via Skills panel (merged).
 
@@ -2141,33 +2146,51 @@ const App: React.FC<AppProps> = ({
     parsedNodes: MindMapNode[],
     parsedEdges: MindMapEdge[]
   ) => {
+    // 计算节点深度的辅助函数
+    const calculateDepth = (nodeId: string, edges: MindMapEdge[]): number => {
+      let depth = 0;
+      let currentId = nodeId;
+      while (true) {
+        const parentEdge = edges.find(edge => edge.to === currentId);
+        if (!parentEdge) break;
+        currentId = parentEdge.from;
+        depth++;
+      }
+      return depth;
+    };
+
     // 创建原有节点的映射，使用更精确的匹配方式
-    // 对于图片节点，使用 assetPath 作为键；对于普通节点，使用标题作为键
-    // 对于组节点，使用特殊标记
-    const originalNodesMap = new Map<string, MindMapNode>();
-    const originalGroupNodes = new Map<string, MindMapNode>();
+    // 优先使用节点 ID 进行匹配，其次使用其他方式
+    const originalNodesById = new Map<string, MindMapNode>();
+    const originalNodesByTitleAndDepth = new Map<string, MindMapNode[]>();
+    const originalGroupNodes = new Map<string, MindMapNode[]>();
     
     originalNodes.forEach(node => {
+      // 按 ID 存储所有节点
+      originalNodesById.set(node.id, node);
+      
       if (node.type === 'group') {
         // 组节点使用特殊标记
-        let key = `group:${node.title}`;
-        let index = 0;
-        while (originalGroupNodes.has(key)) {
-          index++;
-          key = `group:${node.title}:${index}`;
+        const key = `group:${node.title}`;
+        if (!originalGroupNodes.has(key)) {
+          originalGroupNodes.set(key, []);
         }
-        originalGroupNodes.set(key, node);
+        originalGroupNodes.get(key)!.push(node);
       } else if (node.type === 'image' && node.assetPath) {
-        originalNodesMap.set(`image:${node.assetPath}`, node);
-      } else {
-        // 为普通节点添加索引，避免同名节点冲突
-        let key = `node:${node.title}`;
-        let index = 0;
-        while (originalNodesMap.has(key)) {
-          index++;
-          key = `node:${node.title}:${index}`;
+        // 图片节点使用 assetPath 匹配
+        const key = `image:${node.assetPath}`;
+        if (!originalNodesByTitleAndDepth.has(key)) {
+          originalNodesByTitleAndDepth.set(key, []);
         }
-        originalNodesMap.set(key, node);
+        originalNodesByTitleAndDepth.get(key)!.push(node);
+      } else {
+        // 普通节点使用标题和深度匹配
+        const depth = calculateDepth(node.id, originalEdges);
+        const key = `node:${node.title}:${depth}`;
+        if (!originalNodesByTitleAndDepth.has(key)) {
+          originalNodesByTitleAndDepth.set(key, []);
+        }
+        originalNodesByTitleAndDepth.get(key)!.push(node);
       }
     });
 
@@ -2180,46 +2203,76 @@ const App: React.FC<AppProps> = ({
     // ID 映射表：从新 ID（parsedNodes 中）到原有 ID
     const idMap = new Map<string, string>();
     
-    // 用于跟踪普通节点的标题计数，避免同名节点冲突
-    const titleCounts = new Map<string, number>();
-    const groupTitleCounts = new Map<string, number>();
+    // 用于跟踪已匹配的原有节点
+    const matchedOriginalNodeIds = new Set<string>();
+    
+    // 用于跟踪已处理的新节点 ID，避免重复处理
+    const processedNewNodeIds = new Set<string>();
     
     // 使用原有节点的位置和样式更新解析后的节点
     const mergedNodes = parsedNodes.map(newNode => {
+      // 避免重复处理同一节点
+      if (processedNewNodeIds.has(newNode.id)) {
+        return newNode;
+      }
+      processedNewNodeIds.add(newNode.id);
+      
       let originalNode: MindMapNode | undefined;
-      let key: string;
       
-      // 首先尝试匹配组节点
-      const groupBaseKey = `group:${newNode.title}`;
-      const groupCount = groupTitleCounts.get(newNode.title) || 0;
-      const groupKey = groupCount === 0 ? groupBaseKey : `${groupBaseKey}:${groupCount}`;
-      originalNode = originalGroupNodes.get(groupKey);
+      // 首先尝试按 ID 匹配节点
+      originalNode = originalNodesById.get(newNode.id);
       
-      if (originalNode) {
+      if (originalNode && !matchedOriginalNodeIds.has(originalNode.id)) {
         // 记录 ID 映射
         idMap.set(newNode.id, originalNode.id);
-        // 保留原有组节点的所有属性
+        matchedOriginalNodeIds.add(originalNode.id);
+        // 保留原有节点的位置、样式、颜色等
         return {
-          ...originalNode
+          ...newNode,
+          id: originalNode.id, // 保留原有 ID
+          x: originalNode.x,
+          y: originalNode.y,
+          width: originalNode.width,
+          height: originalNode.height,
+          color: originalNode.color,
+          icon: originalNode.icon,
+          iconPosition: originalNode.iconPosition,
+          type: originalNode.type, // 保留原有类型
+          // 对于图片节点，保留原有的 imageUrl
+          imageUrl: originalNode.imageUrl || newNode.imageUrl,
+          // 对于组节点，保留原有属性
+          parentId: originalNode.parentId
         };
       }
       
-      // 然后尝试匹配图片节点
-      if (newNode.type === 'image' && newNode.assetPath) {
-        key = `image:${newNode.assetPath}`;
-        originalNode = originalNodesMap.get(key);
+      // 然后尝试按标题、类型和深度匹配节点
+      if (newNode.type === 'group') {
+        // 组节点使用标题匹配
+        const key = `group:${newNode.title}`;
+        const groupNodes = originalGroupNodes.get(key) || [];
+        // 找到第一个未匹配的组节点
+        originalNode = groupNodes.find(node => !matchedOriginalNodeIds.has(node.id));
+      } else if (newNode.type === 'image' && newNode.assetPath) {
+        // 图片节点使用 assetPath 匹配
+        const key = `image:${newNode.assetPath}`;
+        const imageNodes = originalNodesByTitleAndDepth.get(key) || [];
+        // 找到第一个未匹配的图片节点
+        originalNode = imageNodes.find(node => !matchedOriginalNodeIds.has(node.id));
       } else {
-        // 最后尝试匹配普通节点
-        const baseKey = `node:${newNode.title}`;
-        const count = titleCounts.get(newNode.title) || 0;
-        key = count === 0 ? baseKey : `${baseKey}:${count}`;
-        originalNode = originalNodesMap.get(key);
-        titleCounts.set(newNode.title, count + 1);
+        // 普通节点使用标题和深度匹配
+        // 从新节点 ID 中提取深度信息（如果可能）
+        // 或者使用解析时的深度（通过标题和层级关系计算）
+        const depth = calculateDepth(newNode.id, parsedEdges);
+        const key = `node:${newNode.title}:${depth}`;
+        const nodes = originalNodesByTitleAndDepth.get(key) || [];
+        // 找到第一个未匹配的普通节点
+        originalNode = nodes.find(node => !matchedOriginalNodeIds.has(node.id));
       }
       
       if (originalNode) {
         // 记录 ID 映射
         idMap.set(newNode.id, originalNode.id);
+        matchedOriginalNodeIds.add(originalNode.id);
         // 保留原有节点的位置、样式、颜色等
         return {
           ...newNode,
@@ -2244,18 +2297,22 @@ const App: React.FC<AppProps> = ({
       return newNode;
     });
 
-    // 添加未在解析结果中但存在于原有节点中的组节点
-    originalGroupNodes.forEach((groupNode, key) => {
-      const groupTitle = groupNode.title;
-      const groupCount = groupTitleCounts.get(groupTitle) || 0;
-      const groupKey = groupCount === 0 ? `group:${groupTitle}` : `group:${groupTitle}:${groupCount}`;
-      
-      // 检查组节点是否已经被匹配
-      const isGroupMatched = mergedNodes.some(node => node.id === groupNode.id);
-      if (!isGroupMatched) {
-        mergedNodes.push(groupNode);
-        idMap.set(groupNode.id, groupNode.id);
-        groupTitleCounts.set(groupTitle, groupCount + 1);
+    // 添加未在解析结果中但存在于原有节点中的所有类型节点（不仅仅是组节点）
+    originalNodes.forEach(originalNode => {
+      if (!matchedOriginalNodeIds.has(originalNode.id)) {
+        mergedNodes.push(originalNode);
+        idMap.set(originalNode.id, originalNode.id);
+        matchedOriginalNodeIds.add(originalNode.id);
+      }
+    });
+
+    // 去重：确保 mergedNodes 中没有重复的节点
+    const uniqueNodes = [];
+    const seenNodeIds = new Set<string>();
+    mergedNodes.forEach(node => {
+      if (!seenNodeIds.has(node.id)) {
+        seenNodeIds.add(node.id);
+        uniqueNodes.push(node);
       }
     });
 
@@ -2306,117 +2363,72 @@ const App: React.FC<AppProps> = ({
       }
     });
 
-    return { nodes: mergedNodes, edges: mergedEdges };
+    // 去重：确保 mergedEdges 中没有重复的边
+    const uniqueEdges = [];
+    const seenEdgePairs = new Set<string>();
+    mergedEdges.forEach(edge => {
+      const edgeKey = `${edge.from}=>${edge.to}`;
+      if (!seenEdgePairs.has(edgeKey)) {
+        seenEdgePairs.add(edgeKey);
+        uniqueEdges.push(edge);
+      }
+    });
+
+    return { nodes: uniqueNodes, edges: uniqueEdges };
   }, []);
 
-  // 保存脑图状态的ref
-  const mindmapStateRef = useRef({ nodes: nodes, edges: edges, transform: transform, markdown: markdownContent });
-  
-  // 当脑图状态（节点/边/视口）变化时更新 ref 中对应字段，但不要覆盖 ref 中已保存的 markdown
-  useEffect(() => {
-    mindmapStateRef.current = { nodes, edges, transform, markdown: mindmapStateRef.current.markdown };
-  }, [nodes, edges, transform]);
+
 
   // Handle background pattern change
   const handleBackgroundChange = useCallback((pattern: 'none' | 'dots' | 'grid' | 'lines') => {
     setCurrentBackground(pattern);
   }, []);
 
-  const handleToggleView = useCallback(() => {
-    if (currentView === 'mindmap') {
-      // 从脑图视图切换到Markdown视图
-      saveHistory(); // 保存当前状态到历史记录
-      const md = generateMarkdown(nodes, edges);
-      // 保存Markdown内容
-      setMarkdownContent(md);
-      // 更新mindmapStateRef中的markdown内容
-      mindmapStateRef.current = { nodes, edges, transform, markdown: md };
-      // 保存当前脑图状态
-      const currentData = { nodes, edges, transform, version: 1 };
-      const dataString = JSON.stringify(currentData, null, 2);
-      onSave?.(dataString);
-      // 更新视图状态
-      setCurrentView('markdown');
-    } else {
-        // 从Markdown视图切换到脑图视图
-        saveHistory(); // 保存当前状态到历史记录
-        
-        // 检查Markdown内容是否有变化
-        if (markdownContent !== mindmapStateRef.current.markdown) {
-          // 如果Markdown内容有变化，重新解析生成新的节点和边
-          let { nodes: parsedNodes, edges: parsedEdges } = parseMarkdown(markdownContent);
-          
-          // 解析图片节点的assetPath为imageUrl
-          if (onResolveResource) {
-              parsedNodes = parsedNodes.map((node: MindMapNode) => {
-                  if (node.type === 'image' && node.assetPath) {
-                      return { ...node, imageUrl: onResolveResource(node.assetPath) };
-                  }
-                  return node;
-              });
-          }
-          
-          // 合并解析结果与原有脑图状态，保留原有节点的位置和边的样式
-          const { nodes: mergedNodes, edges: mergedEdges } = mergeMarkdownWithExistingGraph(
-            mindmapStateRef.current.nodes,
-            mindmapStateRef.current.edges,
-            parsedNodes,
-            parsedEdges
-          );
-          
-          // 直接更新状态
-          setNodes(mergedNodes);
-          setEdges(mergedEdges);
-          // 立即更新mindmapStateRef，使用合并后的节点和边
-          mindmapStateRef.current = { 
-            nodes: mergedNodes, 
-            edges: mergedEdges, 
-            transform: mindmapStateRef.current.transform, 
-            markdown: markdownContent 
-          };
-          // 保存切换后的状态
-          const currentData = { nodes: mergedNodes, edges: mergedEdges, transform: mindmapStateRef.current.transform, version: 1 };
-          const dataString = JSON.stringify(currentData, null, 2);
-          onSave?.(dataString);
-        } else {
-          // 如果Markdown内容没有变化，使用之前保存的脑图状态
-          const { nodes: savedNodes, edges: savedEdges, transform: savedTransform } = mindmapStateRef.current;
-          setNodes(savedNodes);
-          setEdges(savedEdges);
-          setTransform(savedTransform);
-          // 保存切换后的状态
-          const currentData = { nodes: savedNodes, edges: savedEdges, transform: savedTransform, version: 1 };
-          const dataString = JSON.stringify(currentData, null, 2);
-          onSave?.(dataString);
-        }
-        
-        setCurrentView('mindmap');
-      }
-  }, [currentView, nodes, edges, transform, markdownContent, onSave, saveHistory, mergeMarkdownWithExistingGraph]);
+  // 保存原始缩放比例，用于在切换视图时调整
+  const originalScaleRef = useRef(transform.scale || 1);
+  
+  // 计算脑图中心并调整transform以保持居中和一致的缩放比例
+  const centerMindMap = useCallback(() => {
+    if (!containerRef.current || !mindmapContainerRef.current || nodes.length === 0) return;
+    
+    // 计算所有节点的边界
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    nodes.forEach(node => {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + node.width);
+      maxY = Math.max(maxY, node.y + node.height);
+    });
+    
+    if (minX === Infinity) return;
+    
+    // 计算脑图中心
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    // 使用mindmapContainerRef获取实际的脑图容器宽度
+    const mindmapContainer = mindmapContainerRef.current;
+    const mindmapRect = mindmapContainer.getBoundingClientRect();
+    const mindmapWidth = mindmapRect.width;
+    const mindmapHeight = mindmapRect.height;
+    
+    // 保持缩放比例不变，只调整位置以保持居中
+    const newScale = transform.scale;
+    
+    // 计算新的transform，确保节点在脑图视图中心
+    const newX = mindmapWidth / 2 - centerX * newScale;
+    const newY = mindmapHeight / 2 - centerY * newScale;
+    
+    // 直接设置transform，确保立即生效
+    setTransform({ x: newX, y: newY, scale: newScale });
+  }, [nodes, transform]);
 
-  const handleMarkdownChange = useCallback((content: string) => {
-    setMarkdownContent(content);
-    // 只更新markdownContent状态，不更新mindmapStateRef
-    // 这样在切换回脑图视图时，通过比较markdownContent和mindmapStateRef.current.markdown
-    // 就能正确检测到内容变化
-  }, []);
-
-  const handleExportMarkdown = useCallback(() => {
-    const md = generateMarkdown(nodes, edges);
-    if (onSaveMarkdown) {
-        onSaveMarkdown(`${fileName || '思维导图'}.md`, md);
-    } else {
-        // Fallback for web
-        const blob = new Blob([md], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `${fileName || '思维导图'}.md`;
-        link.click();
-        URL.revokeObjectURL(url);
-    }
-    if (onShowMessage) onShowMessage("已导出 Markdown 文件");
-  }, [nodes, edges, fileName, onShowMessage, onSaveMarkdown]);
+  // 保存状态的通用函数
+  const saveCurrentState = useCallback((nodes: MindMapNode[], edges: MindMapEdge[], transform: ViewportTransform) => {
+    const currentData = { nodes, edges, transform, version: 1 };
+    const dataString = JSON.stringify(currentData, null, 2);
+    onSave?.(dataString);
+  }, [onSave]);
 
   // Handle automatic layout
   const handleAutoLayout = useCallback(() => {
@@ -2425,12 +2437,12 @@ const App: React.FC<AppProps> = ({
     // Calculate relationship weights
     const edgesWithWeights = calculateRelationshipWeights(nodes, edges);
     
-    // Get layout parameters from settings
+    // Get layout parameters from local state
     const layoutParams = {
-      repulsionForce: settings.layoutRepulsionForce,
-      attractionForce: settings.layoutAttractionForce,
-      minDistance: settings.layoutMinDistance,
-      iterations: settings.layoutIterations
+      repulsionForce: layoutSettings.repulsionForce,
+      attractionForce: layoutSettings.attractionForce,
+      minDistance: layoutSettings.minDistance,
+      iterations: layoutSettings.iterations
     };
     
     // Calculate new layout
@@ -2486,7 +2498,7 @@ const App: React.FC<AppProps> = ({
     }
     
     if (onShowMessage) onShowMessage("已自动调整布局");
-  }, [nodes, edges, saveHistory, onShowMessage, transform, currentLayout]);
+  }, [nodes, edges, saveHistory, onShowMessage, transform, currentLayout, layoutSettings]);
 
   // Handle layout settings change
   const handleLayoutSettingsChange = useCallback((settings: {
@@ -2495,8 +2507,8 @@ const App: React.FC<AppProps> = ({
     minDistance: number;
     iterations: number;
   }) => {
-    // Layout settings are controlled by the plugin settings, not local state
-    // This function is currently a no-op as settings are managed by the plugin
+    // Update local state with new layout settings
+    setLayoutSettings(settings);
   }, []);
 
 
@@ -2537,7 +2549,7 @@ const App: React.FC<AppProps> = ({
     e.stopPropagation();
     
     saveHistory();
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = mindmapContainerRef.current?.getBoundingClientRect();
     if (!rect) return;
     
     const mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -2747,453 +2759,443 @@ const App: React.FC<AppProps> = ({
       ref={containerRef}
       className={`mindo-canvas-container ${currentBackground !== 'none' ? `mindo-bg-pattern-${currentBackground}` : ''}`}
       onWheel={handleWheel}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        height: '100%'
+      }}
     >
-      {currentView === 'mindmap' && (
-        <div 
-          style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, outline: 'none', cursor: isPanning ? 'grabbing' : 'default' }}
-          onMouseDown={handleMouseDownCanvas}
-          onDoubleClick={handleDoubleClickCanvas}
-          onContextMenu={handleContextMenu}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-        >
+      {/* 主内容区域 */}
+      <div style={{
+        flex: 1,
+        position: 'relative',
+        overflow: 'hidden'
+      }}>
           <div 
-            style={{ 
-              transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
-              transformOrigin: '0 0',
-              width: '100%', 
-              height: '100%',
-              position: 'relative'
-            }}
+            ref={mindmapContainerRef}
+            style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, outline: 'none', cursor: isPanning ? 'grabbing' : 'default' }}
+            onMouseDown={handleMouseDownCanvas}
+            onDoubleClick={handleDoubleClickCanvas}
+            onContextMenu={handleContextMenu}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
           >
-            {groupNodes.map(node => (
-              <NodeComponent
-                key={node.id}
-                node={node}
-                scale={transform.scale}
-                isSelected={selectedNodeIds.has(node.id)}
-                isDragging={draggingNodeId === node.id || (selectedNodeIds.has(node.id) && !!draggingNodeId)}
-                onMouseDown={handleNodeMouseDown}
-                onMouseUp={handleMouseUp} // Use stable handler
-                onConnectStart={handleConnectStart}
-                onConnectEnd={handleConnectEnd}
-                onUpdate={updateNodeData}
-                onResize={updateNodeResize}
-                onResizeStart={saveHistory} 
-                onDelete={deleteNode}
-                onColorChange={updateNodeColor}
-                onShapeChange={updateNodeShape}
-                onContextMenu={handleNodeContextMenu}
-                onRenderMarkdown={onRenderMarkdown}
-                onOpenLink={handleOpenLink}
-                useCodeMirror={false}
-                darkMode={darkMode}
-              />
-            ))}
-            <svg style={{ overflow: 'visible', position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%', zIndex: 25 }}>
-              {edges.map(edge => {
-                const source = nodes.find(n => n.id === edge.from);
-                const target = nodes.find(n => n.id === edge.to);
-                if (!source || !target) return null;
-                return (
-                  <EdgeComponent
-                    key={edge.id}
-                    edge={edge}
-                    sourceNode={source}
-                    targetNode={target}
-                    isSelected={selectedEdgeId === edge.id}
-                    onSelect={handleEdgeSelect}
-                    onDelete={() => { saveHistory(); setEdges(prev => prev.filter(e => e.id !== edge.id)); }}
-                    onUpdate={updateEdge}
-                    onInteractStart={saveHistory} 
-                    transform={transform}
-                  />
-                );
-              })}
-            </svg>
-            <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 30 }}>
-              {edges.map(edge => {
-                const source = nodes.find(n => n.id === edge.from);
-                const target = nodes.find(n => n.id === edge.to);
-                if (!source || !target) return null;
-                return (
-                  <EdgeLabel
-                    key={edge.id}
-                    edge={edge}
-                    sourceNode={source}
-                    targetNode={target}
-                    onSelect={handleEdgeSelect}
-                    darkMode={darkMode}
-                  />
-                );
-              })}
-            </div>
-            {standardNodes.map(node => (
-              <NodeComponent
-                key={node.id}
-                node={node}
-                scale={transform.scale}
-                isSelected={selectedNodeIds.has(node.id)}
-                isDragging={draggingNodeId === node.id || (selectedNodeIds.has(node.id) && !!draggingNodeId)}
-                onMouseDown={handleNodeMouseDown}
-                onMouseUp={handleMouseUp}
-                onConnectStart={handleConnectStart}
-                onConnectEnd={handleConnectEnd}
-                onUpdate={updateNodeData}
-                onResize={updateNodeResize}
-                onResizeStart={saveHistory} 
-                onDelete={deleteNode}
-                onColorChange={updateNodeColor}
-                onShapeChange={updateNodeShape}
-                onContextMenu={handleNodeContextMenu}
-                onRenderMarkdown={onRenderMarkdown}
-                onOpenLink={handleOpenLink}
-                useCodeMirror={false}
-                darkMode={darkMode}
-              />
-            ))}
-            <svg style={{ overflow: 'visible', position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%', zIndex: 60 }}>
-              {selectedEdgeObj && selectedEdgeId && (() => {
-                  const source = nodes.find(n => n.id === selectedEdgeObj.from);
-                  const target = nodes.find(n => n.id === selectedEdgeObj.to);
-                  if (!source || !target) return null;
-                  const start = getHandlePosition(source, selectedEdgeObj.fromHandle);
-                  const end = getHandlePosition(target, selectedEdgeObj.toHandle);
-                  const color = selectedEdgeObj.color || '#94a3b8';
-                  return (
-                      <>
-                           <circle
-                              cx={start.x}
-                              cy={start.y}
-                              r={6}
-                              fill="white"
-                              stroke={color}
-                              strokeWidth={2}
-                              cursor="crosshair"
-                              pointerEvents="auto"
-                              onMouseDown={(e) => handleEdgeReconnectStart(e, selectedEdgeObj.id, 'from')}
-                          />
-                           <circle
-                              cx={end.x}
-                              cy={end.y}
-                              r={6}
-                              fill="white"
-                              stroke={color}
-                              strokeWidth={2}
-                              cursor="crosshair"
-                              pointerEvents="auto"
-                              onMouseDown={(e) => handleEdgeReconnectStart(e, selectedEdgeObj.id, 'to')}
-                          />
-                      </>
-                  );
-              })()}
-              {(connectionStart || reconnectingEdge) && tempConnectionEnd && (
-                  <>
-                  <path
-                      d={(() => {
-                          let startPoint: Position;
-                          if (reconnectingEdge) {
-                              const edge = edges.find(e => e.id === reconnectingEdge.edgeId);
-                              if (!edge) return '';
-                              if (reconnectingEdge.which === 'to') {
-                                  const source = nodes.find(n => n.id === edge.from);
-                                  if (!source) return '';
-                                  startPoint = getHandlePosition(source, edge.fromHandle);
-                              } else {
-                                  const target = nodes.find(n => n.id === edge.to);
-                                  if (!target) return '';
-                                  startPoint = getHandlePosition(target, edge.toHandle);
-                              }
-                          } else if (connectionStart) {
-                               const source = nodes.find(n => n.id === connectionStart.nodeId);
-                               if (!source) return '';
-                               startPoint = getHandlePosition(source, connectionStart.handle);
-                          } else {
-                              return '';
-                          }
-                          const endPoint = snapPreview 
-                              ? getHandlePosition(nodes.find(n => n.id === snapPreview.nodeId)!, snapPreview.handle)
-                              : tempConnectionEnd;
-                          return `M ${startPoint.x} ${startPoint.y} L ${endPoint.x} ${endPoint.y}`;
-                      })()}
-                      className={`mindo-connection-preview ${snapPreview ? 'snapping' : ''}`}
-                  />
-                  </>
-              )}
-            </svg>
-            {selectionBox && (
-                <div 
-                    className="mindo-selection-box"
-                    style={{
-                        left: Math.min(selectionBox.start.x, selectionBox.end.x) / transform.scale - transform.x / transform.scale,
-                        top: Math.min(selectionBox.start.y, selectionBox.end.y) / transform.scale - transform.y / transform.scale,
-                        width: Math.abs(selectionBox.end.x - selectionBox.start.x) / transform.scale,
-                        height: Math.abs(selectionBox.end.y - selectionBox.start.y) / transform.scale
-                    }}
+            <div 
+              style={{ 
+                transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+                transformOrigin: '0 0',
+                width: '100%', 
+                height: '100%',
+                position: 'relative'
+              }}
+            >
+              {groupNodes.map(node => (
+                <NodeComponent
+                  key={node.id}
+                  node={node}
+                  scale={transform.scale}
+                  isSelected={selectedNodeIds.has(node.id)}
+                  isDragging={draggingNodeId === node.id || (selectedNodeIds.has(node.id) && !!draggingNodeId)}
+                  onMouseDown={handleNodeMouseDown}
+                  onMouseUp={handleMouseUp} // Use stable handler
+                  onConnectStart={handleConnectStart}
+                  onConnectEnd={handleConnectEnd}
+                  onUpdate={updateNodeData}
+                  onResize={updateNodeResize}
+                  onResizeStart={saveHistory} 
+                  onDelete={deleteNode}
+                  onColorChange={updateNodeColor}
+                  onShapeChange={updateNodeShape}
+                  onContextMenu={handleNodeContextMenu}
+                  onRenderMarkdown={onRenderMarkdown}
+                  onOpenLink={handleOpenLink}
+                  useCodeMirror={false}
+                  darkMode={darkMode}
                 />
-            )}
+              ))}
+              <svg style={{ overflow: 'visible', position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%', zIndex: 25 }}>
+                {edges.map(edge => {
+                  const source = nodes.find(n => n.id === edge.from);
+                  const target = nodes.find(n => n.id === edge.to);
+                  if (!source || !target) return null;
+                  return (
+                    <EdgeComponent
+                      key={edge.id}
+                      edge={edge}
+                      sourceNode={source}
+                      targetNode={target}
+                      isSelected={selectedEdgeId === edge.id}
+                      onSelect={handleEdgeSelect}
+                      onDelete={() => { saveHistory(); setEdges(prev => prev.filter(e => e.id !== edge.id)); }}
+                      onUpdate={updateEdge}
+                      onInteractStart={saveHistory} 
+                      transform={transform}
+                    />
+                  );
+                })}
+              </svg>
+              <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 30 }}>
+                {edges.map(edge => {
+                  const source = nodes.find(n => n.id === edge.from);
+                  const target = nodes.find(n => n.id === edge.to);
+                  if (!source || !target) return null;
+                  return (
+                    <EdgeLabel
+                      key={edge.id}
+                      edge={edge}
+                      sourceNode={source}
+                      targetNode={target}
+                      onSelect={handleEdgeSelect}
+                      darkMode={darkMode}
+                    />
+                  );
+                })}
+              </div>
+              {standardNodes.map(node => (
+                <NodeComponent
+                  key={node.id}
+                  node={node}
+                  scale={transform.scale}
+                  isSelected={selectedNodeIds.has(node.id)}
+                  isDragging={draggingNodeId === node.id || (selectedNodeIds.has(node.id) && !!draggingNodeId)}
+                  onMouseDown={handleNodeMouseDown}
+                  onMouseUp={handleMouseUp}
+                  onConnectStart={handleConnectStart}
+                  onConnectEnd={handleConnectEnd}
+                  onUpdate={updateNodeData}
+                  onResize={updateNodeResize}
+                  onResizeStart={saveHistory} 
+                  onDelete={deleteNode}
+                  onColorChange={updateNodeColor}
+                  onShapeChange={updateNodeShape}
+                  onContextMenu={handleNodeContextMenu}
+                  onRenderMarkdown={onRenderMarkdown}
+                  onOpenLink={handleOpenLink}
+                  useCodeMirror={false}
+                  darkMode={darkMode}
+                />
+              ))}
+              <svg style={{ overflow: 'visible', position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%', zIndex: 60 }}>
+                {selectedEdgeObj && selectedEdgeId && (() => {
+                    const source = nodes.find(n => n.id === selectedEdgeObj.from);
+                    const target = nodes.find(n => n.id === selectedEdgeObj.to);
+                    if (!source || !target) return null;
+                    const start = getHandlePosition(source, selectedEdgeObj.fromHandle);
+                    const end = getHandlePosition(target, selectedEdgeObj.toHandle);
+                    const color = selectedEdgeObj.color || '#94a3b8';
+                    return (
+                        <>
+                             <circle
+                                cx={start.x}
+                                cy={start.y}
+                                r={6}
+                                fill="white"
+                                stroke={color}
+                                strokeWidth={2}
+                                cursor="crosshair"
+                                pointerEvents="auto"
+                                onMouseDown={(e) => handleEdgeReconnectStart(e, selectedEdgeObj.id, 'from')}
+                            />
+                             <circle
+                                cx={end.x}
+                                cy={end.y}
+                                r={6}
+                                fill="white"
+                                stroke={color}
+                                strokeWidth={2}
+                                cursor="crosshair"
+                                pointerEvents="auto"
+                                onMouseDown={(e) => handleEdgeReconnectStart(e, selectedEdgeObj.id, 'to')}
+                            />
+                        </>
+                    );
+                })()}
+                {(connectionStart || reconnectingEdge) && tempConnectionEnd && (
+                    <>
+                    <path
+                        d={(() => {
+                            let startPoint: Position;
+                            if (reconnectingEdge) {
+                                const edge = edges.find(e => e.id === reconnectingEdge.edgeId);
+                                if (!edge) return '';
+                                if (reconnectingEdge.which === 'to') {
+                                    const source = nodes.find(n => n.id === edge.from);
+                                    if (!source) return '';
+                                    startPoint = getHandlePosition(source, edge.fromHandle);
+                                } else {
+                                    const target = nodes.find(n => n.id === edge.to);
+                                    if (!target) return '';
+                                    startPoint = getHandlePosition(target, edge.toHandle);
+                                }
+                            } else if (connectionStart) {
+                                 const source = nodes.find(n => n.id === connectionStart.nodeId);
+                                 if (!source) return '';
+                                 startPoint = getHandlePosition(source, connectionStart.handle);
+                            } else {
+                                return '';
+                            }
+                            const endPoint = snapPreview 
+                                ? getHandlePosition(nodes.find(n => n.id === snapPreview.nodeId)!, snapPreview.handle)
+                                : tempConnectionEnd;
+                            return `M ${startPoint.x} ${startPoint.y} L ${endPoint.x} ${endPoint.y}`;
+                        })()}
+                        className={`mindo-connection-preview ${snapPreview ? 'snapping' : ''}`}
+                    />
+                    </>
+                )}
+              </svg>
+              {selectionBox && (
+                  <div 
+                      className="mindo-selection-box"
+                      style={{
+                          left: Math.min(selectionBox.start.x, selectionBox.end.x) / transform.scale - transform.x / transform.scale,
+                          top: Math.min(selectionBox.start.y, selectionBox.end.y) / transform.scale - transform.y / transform.scale,
+                          width: Math.abs(selectionBox.end.x - selectionBox.start.x) / transform.scale,
+                          height: Math.abs(selectionBox.end.y - selectionBox.start.y) / transform.scale
+                      }}
+                  />
+              )}
+            </div>
           </div>
-        </div>
-      )}
-      {currentView === 'mindmap' && selectedEdgeId && selectedEdgeObj && (
-          <EdgeMenu 
-              edge={selectedEdgeObj} 
-              onUpdate={(id, updates) => {
-                  saveHistory(); 
-                  updateEdge(id, updates);
-              }}
-              onDelete={(id) => {
-                  saveHistory(); 
-                  setEdges(prev => prev.filter(e => e.id !== selectedEdgeObj.id));
-              }}
-          />
-      )}
-      {/* Search Bar */}
-      {currentView === 'mindmap' && (
-        <SearchBar
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          searchResults={searchResults}
-          isSearching={isSearching}
-          onSearch={searchFiles}
-          onImportFile={importFile}
-          isVisible={!selectedEdgeId && selectedNodeIds.size === 0}
-        />
-      )}
-      
-      <Toolbar
-        scale={transform.scale}
-        onZoomIn={() => setTransform(t => ({ ...t, scale: Math.min(t.scale + 0.2, 5) }))}
-        onZoomOut={() => setTransform(t => ({ ...t, scale: Math.max(t.scale - 0.2, 0.1) }))}
-        onFitView={() => {
-            if (containerRef.current && nodes.length > 0) {
-                // 计算所有节点的边界
-                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                nodes.forEach(node => {
-                    minX = Math.min(minX, node.x);
-                    minY = Math.min(minY, node.y);
-                    maxX = Math.max(maxX, node.x + node.width);
-                    maxY = Math.max(maxY, node.y + node.height);
-                });
-                
-                // 计算边界的宽度和高度
-                const boundsWidth = maxX - minX;
-                const boundsHeight = maxY - minY;
-                
-                // 获取容器的宽度和高度
-                const containerWidth = containerRef.current.clientWidth;
-                const containerHeight = containerRef.current.clientHeight;
-                
-                // 计算缩放比例，确保所有节点都在视图中
-                const scaleX = (containerWidth * 0.8) / boundsWidth; // 留20%的边距
-                const scaleY = (containerHeight * 0.8) / boundsHeight;
-                const scale = Math.min(scaleX, scaleY, 1); // 最大缩放比例为1
-                
-                // 计算中心位置
-                const centerX = (minX + maxX) / 2;
-                const centerY = (minY + maxY) / 2;
-                
-                // 设置新的变换
-                setTransform({ 
-                    x: containerWidth/2 - centerX * scale, 
-                    y: containerHeight/2 - centerY * scale, 
-                    scale: scale 
-                });
-            }
-        }}
-        
-        onAddGroup={handleCreateGroup}
-        onOpenImageOperationModal={handleOpenImageOperationModal}
-        onExportMarkdown={handleExportMarkdown}
-        onToggleView={handleToggleView}
-        currentView={currentView}
-        onAlign={handleAlign}
-        onUndo={undo}
-        onRedo={redo}
-        onAutoLayout={handleAutoLayout}
-        onBackgroundChange={handleBackgroundChange}
-        currentBackground={currentBackground}
-        layoutSettings={{
-          repulsionForce: settings.layoutRepulsionForce,
-          attractionForce: settings.layoutAttractionForce,
-          minDistance: settings.layoutMinDistance,
-          iterations: settings.layoutIterations
-        }}
-        onLayoutSettingsChange={handleLayoutSettingsChange}
-        canGroup={selectedNodeIds.size > 1}
-        canAlign={selectedNodeIds.size > 1}
-        hasSingleSelection={selectedNodeIds.size === 1}
-        nodeCount={nodes.length}
-        snapToGrid={snapToGrid}
-        onSnapToGridChange={setSnapToGrid}
-      />
-      {/* toolbar always rendered but marked fixed via css */}
-      
-      {/* 脑图视图容器 */}
-      <div 
-        ref={canvasContainerRef}
-        className="mindo-canvas"
-        style={{ 
-          flex: 1, 
-          position: 'relative', 
-          overflow: 'hidden',
-          backgroundColor: darkMode ? '#111827' : '#f3f4f6',
-          transition: 'opacity 0.3s ease-in-out'
-        }}
-        onMouseDown={handleMouseDownCanvas}
-        onContextMenu={handleContextMenu}
-        onDoubleClick={handleDoubleClickCanvas}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-        onWheel={handleWheel}
-      >
-        {/* 脑图内容容器 - 总是渲染，确保导出功能正常工作 */}
-        <div 
-          ref={canvasContentRef}
-          className="mindo-canvas-content"
-          style={{
-            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
-            transformOrigin: '0 0',
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: '100%',
-            height: '100%',
-            pointerEvents: currentView !== 'mindmap' ? 'none' : 'auto',
-            opacity: currentView === 'mindmap' ? 1 : 0,
-            zIndex: currentView === 'mindmap' ? 1 : -1
-          }}
-        >
-          {/* Edges */}
-          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
-            {edges.map(edge => (
-              <EdgeComponent
-                key={edge.id}
-                edge={edge}
-                nodes={nodes}
-                onEdgeSelect={handleEdgeSelect}
-                onEdgeReconnectStart={handleEdgeReconnectStart}
-                selectedEdgeId={selectedEdgeId}
-                darkMode={darkMode}
-              />
-            ))}
-          </svg>
-          
-          {/* Nodes */}
-          <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
-            {nodes.map(node => (
-              <NodeComponent
-                key={node.id}
-                node={node}
-                isSelected={selectedNodeIds.has(node.id)}
-                isDragging={draggingNodeId === node.id}
-                onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-                onMouseUp={() => setDraggingNodeId(null)}
-                onConnectStart={(e, handle) => handleConnectStart(e, node.id, handle)}
-                onConnectEnd={(e, handle) => handleConnectEnd(e, node.id, handle)}
-                onUpdate={updateNodeData}
-                onResize={updateNodeResize}
-                onResizeStart={() => {}}
-                onDelete={() => deleteNode(node.id)}
-                onColorChange={(color) => updateNodeColor(node.id, color)}
-                onShapeChange={(shape) => updateNodeShape(node.id, shape)}
-                onContextMenu={(e) => handleNodeContextMenu(e, node.id)}
-                onSelect={() => handleNodeSelect(node.id)}
-                scale={transform.scale}
-                onRenderMarkdown={onRenderMarkdown}
-                onOpenLink={handleOpenLink}
-                useCodeMirror={true}
-                darkMode={darkMode}
-              />
-            ))}
-          </div>
-        </div>
-        
-        {/* Temp Connection */}
-        {connectionStart && tempConnectionEnd && (
-          <svg 
-            className="mindo-temp-connection" 
-            style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
-          >
-            <line 
-              x1={getHandlePosition(nodes.find(n => n.id === connectionStart.nodeId)!, connectionStart.handle).x + transform.x}
-              y1={getHandlePosition(nodes.find(n => n.id === connectionStart.nodeId)!, connectionStart.handle).y + transform.y}
-              x2={tempConnectionEnd.x * transform.scale + transform.x}
-              y2={tempConnectionEnd.y * transform.scale + transform.y}
-              stroke={darkMode ? '#a3a3a3' : '#94a3b8'}
-              strokeWidth={2}
-              strokeDasharray="5,5"
+        {selectedEdgeId && selectedEdgeObj && (
+            <EdgeMenu 
+                edge={selectedEdgeObj} 
+                onUpdate={(id, updates) => {
+                    saveHistory(); 
+                    updateEdge(id, updates);
+                }}
+                onDelete={(id) => {
+                    saveHistory(); 
+                    setEdges(prev => prev.filter(e => e.id !== selectedEdgeObj.id));
+                }}
             />
-          </svg>
         )}
-        
-        {/* Selection Box */}
-        {selectionBox && (
-          <div 
-            className="mindo-selection-box"
-            style={{
-              position: 'absolute',
-              left: Math.min(selectionBox.start.x, selectionBox.end.x),
-              top: Math.min(selectionBox.start.y, selectionBox.end.y),
-              width: Math.abs(selectionBox.end.x - selectionBox.start.x),
-              height: Math.abs(selectionBox.end.y - selectionBox.start.y),
-              border: `1px dashed ${darkMode ? '#a3a3a3' : '#94a3b8'}`,
-              backgroundColor: darkMode ? 'rgba(163, 163, 163, 0.1)' : 'rgba(148, 163, 184, 0.1)',
-              pointerEvents: 'none'
-            }}
-          />
-        )}
-        
         {/* Search Bar */}
-        {showSearchBox && (
+        {
           <SearchBar
-            query={searchQuery}
-            onQueryChange={setSearchQuery}
-            results={searchResults}
-            onSelectResult={(nodeId) => {
-              const node = nodes.find(n => n.id === nodeId);
-              if (node) {
-                setTransform(prev => ({
-                  ...prev,
-                  x: containerRef.current!.clientWidth / 2 - (node.x + node.width / 2) * prev.scale,
-                  y: containerRef.current!.clientHeight / 2 - (node.y + node.height / 2) * prev.scale
-                }));
-                setSelectedNodeIds(new Set([nodeId]));
-                setShowSearchBox(false);
-              }
-            }}
-            onClose={() => setShowSearchBox(false)}
-            darkMode={darkMode}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            searchResults={searchResults}
+            isSearching={isSearching}
+            onSearch={searchFiles}
+            onImportFile={importFile}
+            isVisible={!selectedEdgeId && selectedNodeIds.size === 0}
           />
-        )}
-      </div>
-      
-      {/* Markdown View */}
-      {currentView === 'markdown' && (
+        }
+        
+        <Toolbar
+          scale={transform.scale}
+          onZoomIn={() => setTransform(t => ({ ...t, scale: Math.min(t.scale + 0.2, 5) }))}
+          onZoomOut={() => setTransform(t => ({ ...t, scale: Math.max(t.scale - 0.2, 0.1) }))}
+          onFitView={() => {
+              if (containerRef.current && nodes.length > 0) {
+                  // 计算所有节点的边界
+                  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                  nodes.forEach(node => {
+                      minX = Math.min(minX, node.x);
+                      minY = Math.min(minY, node.y);
+                      maxX = Math.max(maxX, node.x + node.width);
+                      maxY = Math.max(maxY, node.y + node.height);
+                  });
+                  
+                  // 计算边界的宽度和高度
+                  const boundsWidth = maxX - minX;
+                  const boundsHeight = maxY - minY;
+                  
+                  // 获取容器的宽度和高度
+                  const containerWidth = containerRef.current.clientWidth;
+                  const containerHeight = containerRef.current.clientHeight;
+                  
+                  // 计算缩放比例，确保所有节点都在视图中
+                  const scaleX = (containerWidth * 0.8) / boundsWidth; // 留20%的边距
+                  const scaleY = (containerHeight * 0.8) / boundsHeight;
+                  const scale = Math.min(scaleX, scaleY, 1); // 最大缩放比例为1
+                  
+                  // 计算中心位置
+                  const centerX = (minX + maxX) / 2;
+                  const centerY = (minY + maxY) / 2;
+                  
+                  // 设置新的变换
+                  setTransform({ 
+                      x: containerWidth/2 - centerX * scale, 
+                      y: containerHeight/2 - centerY * scale, 
+                      scale: scale 
+                  });
+              }
+          }}
+          
+          onAddGroup={handleCreateGroup}
+          onOpenImageOperationModal={handleOpenImageOperationModal}
+
+          onAlign={handleAlign}
+          onUndo={undo}
+          onRedo={redo}
+          onAutoLayout={handleAutoLayout}
+          onBackgroundChange={handleBackgroundChange}
+          currentBackground={currentBackground}
+          layoutSettings={{
+            repulsionForce: layoutSettings.repulsionForce,
+            attractionForce: layoutSettings.attractionForce,
+            minDistance: layoutSettings.minDistance,
+            iterations: layoutSettings.iterations
+          }}
+          onLayoutSettingsChange={handleLayoutSettingsChange}
+          canGroup={selectedNodeIds.size > 1}
+          canAlign={selectedNodeIds.size > 1}
+          hasSingleSelection={selectedNodeIds.size === 1}
+          nodeCount={nodes.length}
+          snapToGrid={snapToGrid}
+          onSnapToGridChange={setSnapToGrid}
+        />
+        {/* toolbar always rendered but marked fixed via css */}
+        
+        {/* 脑图视图容器 */}
         <div 
-          ref={markdownWrapperRef}
-          className="mindo-markdown-view"
+          ref={canvasContainerRef}
+          className="mindo-canvas"
           style={{ 
             flex: 1, 
             position: 'relative', 
-            overflow: 'auto',
-            backgroundColor: 'transparent',
-            padding: '20px',
-            transition: 'opacity 0.3s ease-in-out',
-            border: 'none',
-            margin: 0
+            overflow: 'hidden',
+            backgroundColor: darkMode ? '#111827' : '#f3f4f6',
+            transition: 'opacity 0.3s ease-in-out'
           }}
+          onMouseDown={handleMouseDownCanvas}
+          onContextMenu={handleContextMenu}
+          onDoubleClick={handleDoubleClickCanvas}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+          onWheel={handleWheel}
         >
-          <MarkdownView
-            markdown={markdownContent}
-            onChange={handleMarkdownChange}
-            darkMode={darkMode}
-          />
+          {/* 脑图内容容器 - 总是渲染，确保导出功能正常工作 */}
+          <div 
+            ref={canvasContentRef}
+            className="mindo-canvas-content"
+            style={{
+              transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+              transformOrigin: '0 0',
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              pointerEvents: 'auto',
+              opacity: 1,
+              zIndex: 1
+            }}
+          >
+            {/* Edges */}
+            <svg 
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+            >
+              {edges.map(edge => (
+                <EdgeComponent
+                  key={edge.id}
+                  edge={edge}
+                  nodes={nodes}
+                  onEdgeSelect={handleEdgeSelect}
+                  onEdgeReconnectStart={handleEdgeReconnectStart}
+                  selectedEdgeId={selectedEdgeId}
+                  darkMode={darkMode}
+                />
+              ))}
+            </svg>
+            
+            {/* Nodes */}
+            <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
+              {nodes.map(node => (
+                <NodeComponent
+                  key={node.id}
+                  node={node}
+                  isSelected={selectedNodeIds.has(node.id)}
+                  isDragging={draggingNodeId === node.id}
+                  onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                  onMouseUp={() => setDraggingNodeId(null)}
+                  onConnectStart={(e, handle) => handleConnectStart(e, node.id, handle)}
+                  onConnectEnd={(e, handle) => handleConnectEnd(e, node.id, handle)}
+                  onUpdate={updateNodeData}
+                  onResize={updateNodeResize}
+                  onResizeStart={() => {}}
+                  onDelete={() => deleteNode(node.id)}
+                  onColorChange={(color) => updateNodeColor(node.id, color)}
+                  onShapeChange={(shape) => updateNodeShape(node.id, shape)}
+                  onContextMenu={(e) => handleNodeContextMenu(e, node.id)}
+                  onSelect={() => handleNodeSelect(node.id)}
+                  scale={transform.scale}
+                  onRenderMarkdown={onRenderMarkdown}
+                  onOpenLink={handleOpenLink}
+                  useCodeMirror={true}
+                  darkMode={darkMode}
+                />
+              ))}
+            </div>
+          </div>
+          
+          {/* Temp Connection */}
+          {connectionStart && tempConnectionEnd && (
+            <svg 
+              className="mindo-temp-connection" 
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+            >
+              <line 
+                x1={getHandlePosition(nodes.find(n => n.id === connectionStart.nodeId)!, connectionStart.handle).x + transform.x}
+                y1={getHandlePosition(nodes.find(n => n.id === connectionStart.nodeId)!, connectionStart.handle).y + transform.y}
+                x2={tempConnectionEnd.x * transform.scale + transform.x}
+                y2={tempConnectionEnd.y * transform.scale + transform.y}
+                stroke={darkMode ? '#a3a3a3' : '#94a3b8'}
+                strokeWidth={2}
+                strokeDasharray="5,5"
+              />
+            </svg>
+          )}
+          
+          {/* Selection Box */}
+          {selectionBox && (
+            <div 
+              className="mindo-selection-box"
+              style={{
+                position: 'absolute',
+                left: Math.min(selectionBox.start.x, selectionBox.end.x),
+                top: Math.min(selectionBox.start.y, selectionBox.end.y),
+                width: Math.abs(selectionBox.end.x - selectionBox.start.x),
+                height: Math.abs(selectionBox.end.y - selectionBox.start.y),
+                border: `1px dashed ${darkMode ? '#a3a3a3' : '#94a3b8'}`,
+                backgroundColor: darkMode ? 'rgba(163, 163, 163, 0.1)' : 'rgba(148, 163, 184, 0.1)',
+                pointerEvents: 'none'
+              }}
+            />
+          )}
+          
+          {/* Search Bar */}
+          {showSearchBox && (
+            <SearchBar
+              query={searchQuery}
+              onQueryChange={setSearchQuery}
+              results={searchResults}
+              onSelectResult={(nodeId) => {
+                const node = nodes.find(n => n.id === nodeId);
+                if (node) {
+                  setTransform(prev => ({
+                    ...prev,
+                    x: (containerRef.current!.clientWidth) / 2 - (node.x + node.width / 2) * prev.scale,
+                    y: containerRef.current!.clientHeight / 2 - (node.y + node.height / 2) * prev.scale
+                  }));
+                  setSelectedNodeIds(new Set([nodeId]));
+                  setShowSearchBox(false);
+                }
+              }}
+              onClose={() => setShowSearchBox(false)}
+              darkMode={darkMode}
+            />
+          )}
         </div>
-      )}
+      </div>
+      
+
       
       {/* Context Menu */}
-      {currentView === 'mindmap' && (
+      {
         <ContextMenu
         x={contextMenu.x}
         y={contextMenu.y}
@@ -3238,10 +3240,10 @@ const App: React.FC<AppProps> = ({
           }
         ].filter(Boolean)}
       />
-      )}
+      }
       
       {/* Icon Selector */}
-      {currentView === 'mindmap' && showIconSelector && (
+      {showIconSelector && (
         <IconSelector
           onSelectIcon={handleSelectIcon}
           onClose={() => setShowIconSelector(false)}
@@ -3250,7 +3252,7 @@ const App: React.FC<AppProps> = ({
       )}
       
       {/* Node Menu */}
-      {currentView === 'mindmap' && selectedNodeForMenu && (
+      {selectedNodeForMenu && (
         <NodeMenu
           node={selectedNodeForMenu}
           onDelete={deleteNode}

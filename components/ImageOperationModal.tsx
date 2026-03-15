@@ -11,7 +11,6 @@ interface ImageOperationModalProps {
 export interface ImageOperationOptions {
   resolution: number;
   margin: number;
-  theme: 'light' | 'dark';
 }
 
 export class ImageOperationModal extends Modal {
@@ -19,7 +18,6 @@ export class ImageOperationModal extends Modal {
   private onCopyImage: (options: ImageOperationOptions) => void;
   private resolution: number;
   private margin: number;
-  private theme: 'light' | 'dark';
 
   constructor(props: ImageOperationModalProps) {
     super(props.app);
@@ -27,7 +25,6 @@ export class ImageOperationModal extends Modal {
     this.onCopyImage = props.onCopyImage;
     this.resolution = 1;
     this.margin = 20;
-    this.theme = 'light';
   }
 
   onOpen() {
@@ -61,18 +58,7 @@ export class ImageOperationModal extends Modal {
         })
       );
 
-    // 主题设置
-    new Setting(contentEl)
-      .setName('主题')
-      .setDesc('选择导出图片的主题')
-      .addDropdown(dropdown => dropdown
-        .addOption('light', '浅色')
-        .addOption('dark', '深色')
-        .setValue(this.theme)
-        .onChange(value => {
-          this.theme = value as 'light' | 'dark';
-        })
-      );
+
 
     // 操作按钮
     const buttonContainer = contentEl.createDiv();
@@ -87,8 +73,7 @@ export class ImageOperationModal extends Modal {
     }).addEventListener('click', () => {
       this.onExportImage({
         resolution: this.resolution,
-        margin: this.margin,
-        theme: this.theme
+        margin: this.margin
       });
       this.close();
     });
@@ -99,8 +84,7 @@ export class ImageOperationModal extends Modal {
     }).addEventListener('click', () => {
       this.onCopyImage({
         resolution: this.resolution,
-        margin: this.margin,
-        theme: this.theme
+        margin: this.margin
       });
       this.close();
     });

@@ -8,9 +8,6 @@ interface ToolbarProps {
   onFitView: () => void;
   onAddGroup: () => void;
   onOpenImageOperationModal: () => void;
-  onExportMarkdown: () => void;
-  onToggleView: () => void;
-  currentView: 'mindmap' | 'markdown';
   onAlign?: (direction: 'horizontal' | 'vertical') => void;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -44,9 +41,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onFitView,
   onAddGroup,
   onOpenImageOperationModal,
-  onExportMarkdown,
-  onToggleView,
-  currentView,
   onAlign,
   onUndo,
   onRedo,
@@ -129,21 +123,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           >
               <ImageIcon size={18} />
           </button>
-
-        <button 
-            onClick={onExportMarkdown} 
-            className="mindo-toolbar-btn" 
-            title="导出 Markdown"
-        >
-            <FileText size={18} />
-        </button>
-        <button 
-            onClick={onToggleView} 
-            className="mindo-toolbar-btn" 
-            title={currentView === 'mindmap' ? '切换到 Markdown 视图' : '切换到脑图视图'}
-        >
-            <FileCode size={18} />
-        </button>
       </div>
 
       <div className="mindo-toolbar-divider" />

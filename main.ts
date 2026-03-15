@@ -9,12 +9,7 @@ const DEFAULT_SETTINGS: MindoSettings = {
     aiApiKey: '',
     aiModel: 'gemini-2.0-flash',
     imageSaveLocation: 'obsidian',
-    imageFolderPath: 'Mindo Assets',
-    // Layout Settings
-    layoutRepulsionForce: 500000,
-    layoutAttractionForce: 0.03,
-    layoutMinDistance: 300,
-    layoutIterations: 300
+    imageFolderPath: 'Mindo Assets'
 }
 
 export default class MindoPlugin extends Plugin {
@@ -323,7 +318,6 @@ class MindoSettingTab extends PluginSettingTab {
                     this.plugin.settings.aiModel = value;
                     await this.plugin.saveSettings();
                 }));
-
 
 
 
